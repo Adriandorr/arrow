@@ -556,6 +556,34 @@ Status RecordBatchStreamReader::ReadNext(std::shared_ptr<RecordBatch>* batch) {
 // ----------------------------------------------------------------------
 // Reader implementation
 
+class RecordSubBatchReader : public IRecordBatchFileReader {
+public:
+    RecordSubBatchReader(std::shared_ptr<arrow::RecordBatch> batch, int32_t max_batch_size) : _batch(std::move(batch)), _max_batch_size(max_batch_size) {
+    }
+
+    int num_record_batches() const override {
+        return (_batch->num_rows() + _max_batch_size - 1) / _max_batch_size;
+    }
+
+    std::shared_ptr<Schema> schema() const {
+        return _batch->schema();
+    }
+
+    Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) final {
+        *batch = _batch->Slice(i * _max_batch_size, _max_batch_size);
+        return arrow::Status::OK();
+    }
+
+    Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size) final {
+        std::shared_ptr<arrow::RecordBatch> batch;
+        ARROW_RETURN_NOT_OK(ReadRecordBatch(i, &batch));
+        *reader = std::make_shared<RecordSubBatchReader>(batch, max_batch_size);
+        return arrow::Status::OK();
+    }
+private:
+    std::shared_ptr<arrow::RecordBatch> _batch;
+    int32_t _max_batch_size;
+};
 class RecordBatchFileReader::RecordBatchFileReaderImpl {
  public:
   RecordBatchFileReaderImpl() : file_(NULLPTR), footer_offset_(0), footer_(NULLPTR) {
@@ -633,7 +661,16 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, &reader, batch);
   }
 
-  Status ReadSchema() {
+  Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
+                                                       int32_t max_batch_size) {
+      std::shared_ptr<arrow::RecordBatch> batch;
+      ARROW_RETURN_NOT_OK(ReadRecordBatch(i, &batch));
+      *reader = std::make_shared<RecordSubBatchReader>(batch, max_batch_size);
+      return arrow::Status::OK();
+  }
+
+
+        Status ReadSchema() {
     RETURN_NOT_OK(internal::GetDictionaryTypes(footer_->schema(), &dictionary_fields_));
 
     // Read all the dictionaries
@@ -743,8 +780,14 @@ Status RecordBatchFileReader::ReadRecordBatch(int i,
   return impl_->ReadRecordBatch(i, batch);
 }
 
-static Status ReadContiguousPayload(io::InputStream* file,
-                                    std::unique_ptr<Message>* message) {
+Status RecordBatchFileReader::ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
+                                                       int32_t max_batch_size) {
+    return impl_->ReadRecordBatchAsBatches(i, reader, max_batch_size);
+}
+
+
+        static Status ReadContiguousPayload(io::InputStream* file,
+                            std::unique_ptr<Message>* message) {
   RETURN_NOT_OK(ReadMessage(file, message));
   if (*message == nullptr) {
     return Status::Invalid("Unable to read metadata at offset");

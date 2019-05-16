@@ -258,6 +258,30 @@ class IpcTestFixture : public io::MemoryMapFixture {
     return file_reader->ReadRecordBatch(0, result);
   }
 
+  Status DoSubReaderRoundTrip(const RecordBatch& batch, bool zero_data,
+                              std::shared_ptr<IRecordBatchFileReader>* result,
+                              int32_t* expected_num_batches) {
+      *expected_num_batches = batch.num_rows() < 3 ? 1 : (batch.num_rows() < 6 ? 4 : 3);
+      if (zero_data) {
+          RETURN_NOT_OK(ZeroMemoryMap(mmap_.get()));
+      }
+      RETURN_NOT_OK(mmap_->Seek(0));
+
+      std::shared_ptr<RecordBatchWriter> file_writer;
+      RETURN_NOT_OK(RecordBatchFileWriter::Open(mmap_.get(), batch.schema(), &file_writer));
+      RETURN_NOT_OK(file_writer->WriteRecordBatch(batch, true));
+      RETURN_NOT_OK(file_writer->Close());
+
+      int64_t offset;
+      RETURN_NOT_OK(mmap_->Tell(&offset));
+
+      std::shared_ptr<RecordBatchFileReader> file_reader;
+      RETURN_NOT_OK(RecordBatchFileReader::Open(mmap_.get(), offset, &file_reader));
+
+      return file_reader->ReadRecordBatchAsBatches(0, result, std::max<int32_t>(batch.num_rows()/ 3, 1));
+
+  }
+
   void CheckReadResult(const RecordBatch& result, const RecordBatch& expected) {
     EXPECT_EQ(expected.num_rows(), result.num_rows());
 
@@ -268,7 +292,23 @@ class IpcTestFixture : public io::MemoryMapFixture {
     CompareBatchColumnsDetailed(result, expected);
   }
 
-  void CheckRoundtrip(const RecordBatch& batch, int64_t buffer_size) {
+void CheckSubReadResult(IRecordBatchFileReader& result, const RecordBatch& expected, int32_t expected_num_batches) {
+    int64_t result_num_rows = 0;
+    ASSERT_TRUE(expected.schema()->Equals(*result.schema()));
+    for (int32_t i = 0; i < result.num_record_batches(); i++) {
+        std::shared_ptr<RecordBatch> sub_result;
+        ASSERT_OK(result.ReadRecordBatch(i, &sub_result));
+        auto sub_expected = expected.Slice(result_num_rows, sub_result->num_rows());
+        ASSERT_EQ(sub_expected->num_columns(), sub_result->num_columns())
+                << sub_expected->schema()->ToString() << " result: " << sub_result->schema()->ToString();
+
+        CompareBatchColumnsDetailed(*sub_result, *sub_expected);
+        result_num_rows += sub_result->num_rows();
+    }
+    EXPECT_EQ(expected.num_rows(), result_num_rows);
+}
+
+void CheckRoundtrip(const RecordBatch& batch, int64_t buffer_size) {
     std::stringstream ss;
     ss << "test-write-row-batch-" << g_file_number++;
     ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(buffer_size, ss.str(), &mmap_));
@@ -283,6 +323,17 @@ class IpcTestFixture : public io::MemoryMapFixture {
 
     ASSERT_OK(DoLargeRoundTrip(batch, true, &result));
     CheckReadResult(*result, batch);
+
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    int32_t expected_num_batches;
+    ASSERT_OK(DoSubReaderRoundTrip(batch, true, &sub_reader, &expected_num_batches));
+    CheckSubReadResult(*sub_reader, batch, expected_num_batches);
+
+    std::shared_ptr<IRecordBatchFileReader> sub_sub_reader;
+    ASSERT_OK(sub_reader->ReadRecordBatchAsBatches(0, &sub_sub_reader, 1));
+    std::shared_ptr<RecordBatch> sub_batch;
+    ASSERT_OK(sub_reader->ReadRecordBatch(0, &sub_batch));
+    CheckSubReadResult(*sub_sub_reader, *sub_batch, sub_batch->num_rows());
   }
 
   void CheckRoundtrip(const std::shared_ptr<Array>& array, int64_t buffer_size) {

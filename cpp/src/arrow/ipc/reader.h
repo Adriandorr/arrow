@@ -94,8 +94,21 @@ class ARROW_EXPORT RecordBatchStreamReader : public RecordBatchReader {
   std::unique_ptr<RecordBatchStreamReaderImpl> impl_;
 };
 
+class IRecordBatchFileReader {
+public:
+    ~IRecordBatchFileReader() = default;
+
+    virtual int num_record_batches() const = 0;
+
+    virtual std::shared_ptr<Schema> schema() const = 0;
+
+    virtual Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) = 0;
+
+    virtual Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size) = 0;
+};
+
 /// \brief Reads the record batch file format
-class ARROW_EXPORT RecordBatchFileReader {
+class ARROW_EXPORT RecordBatchFileReader : public IRecordBatchFileReader {
  public:
   ~RecordBatchFileReader();
 
@@ -141,10 +154,10 @@ class ARROW_EXPORT RecordBatchFileReader {
                      std::shared_ptr<RecordBatchFileReader>* reader);
 
   /// \brief The schema read from the file
-  std::shared_ptr<Schema> schema() const;
+  std::shared_ptr<Schema> schema() const override;
 
   /// \brief Returns the number of record batches in the file
-  int num_record_batches() const;
+  int num_record_batches() const override;
 
   /// \brief Return the metadata version from the file metadata
   MetadataVersion version() const;
@@ -155,9 +168,11 @@ class ARROW_EXPORT RecordBatchFileReader {
   /// \param[in] i the index of the record batch to return
   /// \param[out] batch the read batch
   /// \return Status
-  Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch);
+  Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) override;
 
- private:
+  Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size) override;
+
+private:
   RecordBatchFileReader();
 
   class ARROW_NO_EXPORT RecordBatchFileReaderImpl;
