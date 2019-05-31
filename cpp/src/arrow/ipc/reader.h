@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <limits>
 
 #include "arrow/ipc/message.h"
 #include "arrow/record_batch.h"
@@ -103,8 +104,6 @@ public:
     virtual std::shared_ptr<Schema> schema() const = 0;
 
     virtual Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) = 0;
-
-    virtual Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size) = 0;
 };
 
 /// \brief Reads the record batch file format
@@ -170,13 +169,13 @@ class ARROW_EXPORT RecordBatchFileReader : public IRecordBatchFileReader {
   /// \return Status
   Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) override;
 
-  Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size) override;
+  Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size);
 
 private:
   RecordBatchFileReader();
 
   class ARROW_NO_EXPORT RecordBatchFileReaderImpl;
-  std::unique_ptr<RecordBatchFileReaderImpl> impl_;
+  std::shared_ptr<RecordBatchFileReaderImpl> impl_;
 };
 
 // Generic read functions; does not copy data if the input supports zero copy reads
@@ -221,7 +220,8 @@ Status ReadRecordBatch(const std::shared_ptr<Schema>& schema, io::InputStream* s
 /// \return Status
 ARROW_EXPORT
 Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
-                       io::RandomAccessFile* file, std::shared_ptr<RecordBatch>* out);
+                       io::RandomAccessFile* file, std::shared_ptr<RecordBatch>* out,
+                       int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max());
 
 /// \brief Read record batch from encapsulated Message
 ///
@@ -244,7 +244,7 @@ Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& sc
 ARROW_EXPORT
 Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
                        int max_recursion_depth, io::RandomAccessFile* file,
-                       std::shared_ptr<RecordBatch>* out);
+                       std::shared_ptr<RecordBatch>* out, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max());
 
 /// \brief Read arrow::Tensor as encapsulated IPC message in file
 ///

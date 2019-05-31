@@ -294,15 +294,23 @@ class IpcTestFixture : public io::MemoryMapFixture {
 
 void CheckSubReadResult(IRecordBatchFileReader& result, const RecordBatch& expected, int32_t expected_num_batches) {
     int64_t result_num_rows = 0;
+    int64_t max_batch_size = expected.num_rows() / 3;
     ASSERT_TRUE(expected.schema()->Equals(*result.schema()));
     for (int32_t i = 0; i < result.num_record_batches(); i++) {
+        SCOPED_TRACE(std::to_string(i));
         std::shared_ptr<RecordBatch> sub_result;
         ASSERT_OK(result.ReadRecordBatch(i, &sub_result));
+        auto sub_result_num_rows = sub_result->num_rows();
+        ASSERT_LE(sub_result_num_rows, max_batch_size);
+
         auto sub_expected = expected.Slice(result_num_rows, sub_result->num_rows());
         ASSERT_EQ(sub_expected->num_columns(), sub_result->num_columns())
                 << sub_expected->schema()->ToString() << " result: " << sub_result->schema()->ToString();
 
         CompareBatchColumnsDetailed(*sub_result, *sub_expected);
+        SCOPED_TRACE(sub_result->column(0)->ToString());
+        SCOPED_TRACE(sub_expected->column(0)->ToString());
+        ASSERT_TRUE(sub_result->Equals(*sub_expected));
         result_num_rows += sub_result->num_rows();
     }
     EXPECT_EQ(expected.num_rows(), result_num_rows);
@@ -313,27 +321,21 @@ void CheckRoundtrip(const RecordBatch& batch, int64_t buffer_size) {
     ss << "test-write-row-batch-" << g_file_number++;
     ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(buffer_size, ss.str(), &mmap_));
 
-    std::shared_ptr<Schema> schema_result;
-    ASSERT_OK(DoSchemaRoundTrip(*batch.schema(), &schema_result));
-    ASSERT_TRUE(batch.schema()->Equals(*schema_result));
-
-    std::shared_ptr<RecordBatch> result;
-    ASSERT_OK(DoStandardRoundTrip(batch, &result));
-    CheckReadResult(*result, batch);
-
-    ASSERT_OK(DoLargeRoundTrip(batch, true, &result));
-    CheckReadResult(*result, batch);
+//    std::shared_ptr<Schema> schema_result;
+//    ASSERT_OK(DoSchemaRoundTrip(*batch.schema(), &schema_result));
+//    ASSERT_TRUE(batch.schema()->Equals(*schema_result));
+//
+//    std::shared_ptr<RecordBatch> result;
+//    ASSERT_OK(DoStandardRoundTrip(batch, &result));
+//    CheckReadResult(*result, batch);
+//
+//    ASSERT_OK(DoLargeRoundTrip(batch, true, &result));
+//    CheckReadResult(*result, batch);
 
     std::shared_ptr<IRecordBatchFileReader> sub_reader;
     int32_t expected_num_batches;
     ASSERT_OK(DoSubReaderRoundTrip(batch, true, &sub_reader, &expected_num_batches));
     CheckSubReadResult(*sub_reader, batch, expected_num_batches);
-
-    std::shared_ptr<IRecordBatchFileReader> sub_sub_reader;
-    ASSERT_OK(sub_reader->ReadRecordBatchAsBatches(0, &sub_sub_reader, 1));
-    std::shared_ptr<RecordBatch> sub_batch;
-    ASSERT_OK(sub_reader->ReadRecordBatch(0, &sub_batch));
-    CheckSubReadResult(*sub_sub_reader, *sub_batch, sub_batch->num_rows());
   }
 
   void CheckRoundtrip(const std::shared_ptr<Array>& array, int64_t buffer_size) {
@@ -369,6 +371,254 @@ TEST_P(TestIpcRoundTrip, RoundTrip) {
 
   CheckRoundtrip(*batch, 1 << 20);
 }
+
+TEST_F(TestIpcRoundTrip, TestSimple) {
+    Int32Builder builder(default_memory_pool());
+    ASSERT_OK(builder.AppendValues({1, 2, 3, 4, 5, 6}));
+    std::shared_ptr<Array> array;
+    ASSERT_OK(builder.Finish(&array));
+    auto s = schema({field("test", array->type())});
+    auto batch = RecordBatch::Make(s, array->length(), {array});
+    std::stringstream ss;
+    ss << "test-write-row-batch-" << g_file_number++;
+    ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(1024, ss.str(), &mmap_));
+    int32_t expected_num_batches;
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    ASSERT_OK(DoSubReaderRoundTrip(*batch, true, &sub_reader, &expected_num_batches));
+
+    ASSERT_EQ(sub_reader->num_record_batches(), 3);
+    for (auto i = 0; i < 3; i++) {
+        auto expected = batch->Slice(i*2, 2);
+        std::shared_ptr<RecordBatch> actual;
+        ASSERT_OK(sub_reader->ReadRecordBatch(i, &actual));
+        SCOPED_TRACE(std::to_string(i));
+        SCOPED_TRACE("actual:\n" + actual->column(0)->ToString());
+        SCOPED_TRACE("expected:\n" + expected->column(0)->ToString());
+        ASSERT_TRUE(actual->Equals(*expected));
+    }
+}
+
+TEST_F(TestIpcRoundTrip, TestSimpleWithNulls) {
+    Int32Builder builder(default_memory_pool());
+    ASSERT_OK(builder.AppendValues({1, 2, 3, 4, 5, 6, 7, 8}));
+    ASSERT_OK(builder.AppendNulls(8));
+    ASSERT_OK(builder.AppendValues({17, 18, 19, 20, 21, 22, 23, 24}));
+    std::shared_ptr<Array> array;
+    ASSERT_OK(builder.Finish(&array));
+    auto s = schema({field("test", array->type())});
+    auto batch = RecordBatch::Make(s, array->length(), {array});
+    std::stringstream ss;
+    ss << "test-write-row-batch-" << g_file_number++;
+    ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(1024, ss.str(), &mmap_));
+    int32_t expected_num_batches;
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    ASSERT_OK(DoSubReaderRoundTrip(*batch, true, &sub_reader, &expected_num_batches));
+
+    ASSERT_EQ(sub_reader->num_record_batches(), 3);
+    for (auto i = 0; i < 3; i++) {
+        auto expected = batch->Slice(i*8, 8);
+        std::shared_ptr<RecordBatch> actual;
+        ASSERT_OK(sub_reader->ReadRecordBatch(i, &actual));
+        SCOPED_TRACE(std::to_string(i));
+        SCOPED_TRACE("actual:\n" + actual->column(0)->ToString());
+        SCOPED_TRACE("expected:\n" + expected->column(0)->ToString());
+        ASSERT_EQ(actual->column(0)->ToString(), expected->column(0)->ToString());
+        ASSERT_EQ(actual->column(0)->null_count(), expected->column(0)->null_count());
+        ASSERT_TRUE(actual->column(0)->Equals(*expected->column(0)));
+        ASSERT_TRUE(actual->Equals(*expected));
+    }
+}
+
+TEST_F(TestIpcRoundTrip, TestSimpleWithNullsNon8BitOffset) {
+    Int32Builder builder(default_memory_pool());
+    ASSERT_OK(builder.AppendValues({1, 2, 3, 4}));
+    ASSERT_OK(builder.AppendNulls(6));
+    ASSERT_OK(builder.AppendValues({11, 12, 13, 14, 15, 16, 17, 18}));
+    std::shared_ptr<Array> array;
+    ASSERT_OK(builder.Finish(&array));
+    auto s = schema({field("test", array->type())});
+    auto batch = RecordBatch::Make(s, array->length(), {array});
+    std::stringstream ss;
+    ss << "test-write-row-batch-" << g_file_number++;
+    ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(1024, ss.str(), &mmap_));
+    int32_t expected_num_batches;
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    ASSERT_OK(DoSubReaderRoundTrip(*batch, true, &sub_reader, &expected_num_batches));
+
+    ASSERT_EQ(sub_reader->num_record_batches(), 3);
+    for (auto i = 0; i < 3; i++) {
+        auto expected = batch->Slice(i*6, 6);
+        std::shared_ptr<RecordBatch> actual;
+        ASSERT_OK(sub_reader->ReadRecordBatch(i, &actual));
+        SCOPED_TRACE(std::to_string(i));
+        SCOPED_TRACE("actual:\n" + actual->column(0)->ToString());
+        SCOPED_TRACE("expected:\n" + expected->column(0)->ToString());
+        ASSERT_EQ(actual->column(0)->ToString(), expected->column(0)->ToString());
+        ASSERT_EQ(actual->column(0)->null_count(), expected->column(0)->null_count());
+        ASSERT_TRUE(actual->column(0)->Equals(*expected->column(0)));
+        ASSERT_TRUE(actual->Equals(*expected));
+    }
+}
+
+TEST_F(TestIpcRoundTrip, TestSimpleString) {
+    StringBuilder builder(default_memory_pool());
+    ASSERT_OK(builder.AppendValues({"1", "22", "333", "4444", "55555", "666666"}));
+    std::shared_ptr<Array> array;
+    ASSERT_OK(builder.Finish(&array));
+    auto s = schema({field("test", array->type())});
+    auto batch = RecordBatch::Make(s, array->length(), {array});
+    std::stringstream ss;
+    ss << "test-write-row-batch-" << g_file_number++;
+    ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(1024, ss.str(), &mmap_));
+    int32_t expected_num_batches;
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    ASSERT_OK(DoSubReaderRoundTrip(*batch, true, &sub_reader, &expected_num_batches));
+
+    ASSERT_EQ(sub_reader->num_record_batches(), 3);
+    for (auto i = 0; i < 3; i++) {
+        auto expected = batch->Slice(i*2, 2);
+        std::shared_ptr<RecordBatch> actual;
+        ASSERT_OK(sub_reader->ReadRecordBatch(i, &actual));
+        SCOPED_TRACE(std::to_string(i));
+        SCOPED_TRACE("actual:\n" + actual->column(0)->ToString());
+        SCOPED_TRACE("expected:\n" + expected->column(0)->ToString());
+        auto data = std::dynamic_pointer_cast<StringArray>(actual->column(0));
+        for (int j = 0; i < data->length(); i++) {
+            auto o = data->raw_value_offsets()[j];
+            std::cout << j << ": " << o << std::endl;
+        }
+        std::cout << std::string(data->value_data()->data(), data->value_data()->data() + data->value_data()->size()) << std::endl;
+        ASSERT_EQ(actual->column(0)->ToString(), expected->column(0)->ToString());
+        ASSERT_EQ(actual->column(0)->null_count(), expected->column(0)->null_count());
+        ASSERT_TRUE(actual->column(0)->Equals(*expected->column(0)));
+        ASSERT_TRUE(actual->Equals(*expected));
+    }
+}
+
+TEST_F(TestIpcRoundTrip, TestSimpleStringWithNulls) {
+    StringBuilder builder(default_memory_pool());
+    ASSERT_OK(builder.AppendValues({"1", "2", "3", "4", "5", "6", "7", "8"}));
+    ASSERT_OK(builder.AppendNulls(8));
+    ASSERT_OK(builder.AppendValues({"17", "18", "19", "20", "21", "22", "23", "24"}));
+    std::shared_ptr<Array> array;
+    ASSERT_OK(builder.Finish(&array));
+    auto s = schema({field("test", array->type())});
+    auto batch = RecordBatch::Make(s, array->length(), {array});
+    std::stringstream ss;
+    ss << "test-write-row-batch-" << g_file_number++;
+    ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(1024, ss.str(), &mmap_));
+    int32_t expected_num_batches;
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    ASSERT_OK(DoSubReaderRoundTrip(*batch, true, &sub_reader, &expected_num_batches));
+
+    ASSERT_EQ(sub_reader->num_record_batches(), 3);
+    for (auto i = 0; i < 3; i++) {
+        auto expected = batch->Slice(i*8, 8);
+        std::shared_ptr<RecordBatch> actual;
+        ASSERT_OK(sub_reader->ReadRecordBatch(i, &actual));
+        SCOPED_TRACE(std::to_string(i));
+        SCOPED_TRACE("actual:\n" + actual->column(0)->ToString());
+        SCOPED_TRACE("expected:\n" + expected->column(0)->ToString());
+        auto data = std::dynamic_pointer_cast<StringArray>(actual->column(0));
+        for (int j = 0; i < data->length(); i++) {
+            auto o = data->raw_value_offsets()[j];
+            std::cout << j << ": " << o << std::endl;
+        }
+        std::cout << std::string(data->value_data()->data(), data->value_data()->data() + data->value_data()->size()) << std::endl;
+        ASSERT_EQ(actual->column(0)->ToString(), expected->column(0)->ToString());
+        ASSERT_EQ(actual->column(0)->null_count(), expected->column(0)->null_count());
+        ASSERT_TRUE(actual->column(0)->Equals(*expected->column(0)));
+        ASSERT_TRUE(actual->Equals(*expected));
+    }
+}
+
+TEST_F(TestIpcRoundTrip, TestSimpleListWithNulls) {
+    auto sub_builder = std::make_shared<arrow::Int32Builder>(default_memory_pool());
+    ListBuilder builder(default_memory_pool(), sub_builder);
+    for (int32_t i = 0; i < 25; i++) {
+        auto is_valid = i % 3 != 0;
+        ASSERT_OK(builder.Append(is_valid));
+        if (is_valid) {
+            for (int32_t j = 0; j < 3; j++) {
+                ASSERT_OK(sub_builder->Append(i * 10 + j));
+            }
+        }
+    }
+    std::shared_ptr<Array> array;
+    ASSERT_OK(builder.Finish(&array));
+    auto s = schema({field("test", array->type())});
+    auto batch = RecordBatch::Make(s, array->length(), {array});
+    std::stringstream ss;
+    ss << "test-write-row-batch-" << g_file_number++;
+    ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(1024, ss.str(), &mmap_));
+    int32_t expected_num_batches;
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    ASSERT_OK(DoSubReaderRoundTrip(*batch, true, &sub_reader, &expected_num_batches));
+
+    ASSERT_EQ(sub_reader->num_record_batches(), 4);
+    for (auto i = 0; i < 4; i++) {
+        auto expected = batch->Slice(i*8, 8);
+        std::shared_ptr<RecordBatch> actual;
+        ASSERT_OK(sub_reader->ReadRecordBatch(i, &actual));
+        SCOPED_TRACE(std::to_string(i));
+        SCOPED_TRACE("actual:\n" + actual->column(0)->ToString());
+        SCOPED_TRACE("expected:\n" + expected->column(0)->ToString());
+        ASSERT_TRUE(actual->column(0)->Equals(*expected->column(0)));
+        ASSERT_TRUE(actual->Equals(*expected));
+    }
+}
+
+TEST_F(TestIpcRoundTrip, TestUnionWithNulls) {
+    Int8Builder typeid_builder(default_memory_pool());
+    Int32Builder offset_builder(default_memory_pool());
+    Int32Builder int32_builder(default_memory_pool());
+    StringBuilder str_builder(default_memory_pool());
+
+    for (int32_t i = 0; i < 25; i++) {
+        if (i % 3 == 0) {
+            ASSERT_OK(typeid_builder.AppendNull());
+            ASSERT_OK(offset_builder.Append(int32_builder.length()));
+        }
+        else if (i % 2) {
+            ASSERT_OK(offset_builder.Append(int32_builder.length()));
+            ASSERT_OK(typeid_builder.Append(Type::INT32));
+            ASSERT_OK(int32_builder.Append(i));
+        }
+        else {
+            ASSERT_OK(offset_builder.Append(str_builder.length()));
+            ASSERT_OK(typeid_builder.Append(Type::INT32));
+            ASSERT_OK(str_builder.Append("i" + std::to_string(i)));
+        }
+    }
+
+    std::shared_ptr<Array> typeids, offsets, int32s, strings, array;
+    ASSERT_OK(typeid_builder.Finish(&typeids));
+    ASSERT_OK(offset_builder.Finish(&offsets));
+    ASSERT_OK(int32_builder.Finish(&int32s));
+    ASSERT_OK(str_builder.Finish(&strings));
+
+    ASSERT_OK(UnionArray::MakeDense(*typeids, *offsets, {int32s, strings}, &array));
+    auto s = schema({field("test", array->type())});
+    auto batch = RecordBatch::Make(s, array->length(), {array});
+    std::stringstream ss;
+    ss << "test-write-row-batch-" << g_file_number++;
+    ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(2048, ss.str(), &mmap_));
+    int32_t expected_num_batches;
+    std::shared_ptr<IRecordBatchFileReader> sub_reader;
+    ASSERT_OK(DoSubReaderRoundTrip(*batch, true, &sub_reader, &expected_num_batches));
+
+    ASSERT_EQ(sub_reader->num_record_batches(), 4);
+    for (auto i = 0; i < sub_reader->num_record_batches(); i++) {
+        auto expected = batch->Slice(i*8, 8);
+        std::shared_ptr<RecordBatch> actual;
+        ASSERT_OK(sub_reader->ReadRecordBatch(i, &actual));
+        SCOPED_TRACE(std::to_string(i));
+        SCOPED_TRACE("actual:\n" + actual->column(0)->ToString());
+        SCOPED_TRACE("expected:\n" + expected->column(0)->ToString());
+        ASSERT_TRUE(actual->Equals(*expected));
+    }
+}
+
 
 TEST_F(TestIpcRoundTrip, MetadataVersion) {
   std::shared_ptr<RecordBatch> batch;

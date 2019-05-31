@@ -43,6 +43,7 @@
 #include "arrow/tensor.h"
 #include "arrow/type.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/bit-util.h"
 #include "arrow/visitor_inline.h"
 
 using arrow::internal::checked_pointer_cast;
@@ -97,17 +98,19 @@ class IpcComponentSource {
   IpcComponentSource(const flatbuf::RecordBatch* metadata, io::RandomAccessFile* file)
       : metadata_(metadata), file_(file) {}
 
-  Status GetBuffer(int buffer_index, std::shared_ptr<Buffer>* out) {
+  Status GetBuffer(int buffer_index, std::shared_ptr<Buffer>* out, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max()) {
     const flatbuf::Buffer* buffer = metadata_->buffers()->Get(buffer_index);
+    auto ret_offset = buffer->offset() + offset;
+    auto ret_length = std::min(length, buffer->length() - offset);
 
-    if (buffer->length() == 0) {
+    if (ret_length == 0) {
       *out = nullptr;
       return Status::OK();
     } else {
       DCHECK(BitUtil::IsMultipleOf8(buffer->offset()))
           << "Buffer " << buffer_index
           << " did not start on 8-byte aligned offset: " << buffer->offset();
-      return file_->ReadAt(buffer->offset(), buffer->length(), out);
+      return file_->ReadAt(ret_offset, ret_length, out);
     }
   }
 
@@ -143,13 +146,14 @@ struct ArrayLoaderContext {
 };
 
 static Status LoadArray(const std::shared_ptr<DataType>& type,
-                        ArrayLoaderContext* context, ArrayData* out);
+                        ArrayLoaderContext* context, ArrayData* out, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max());
 
 class ArrayLoader {
  public:
   ArrayLoader(const std::shared_ptr<DataType>& type, ArrayData* out,
-              ArrayLoaderContext* context)
-      : type_(type), context_(context), out_(out) {}
+              ArrayLoaderContext* context, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max())
+      : type_(type), context_(context), out_(out), _offset(offset), _length(length) {
+  }
 
   Status Load() {
     if (context_->max_recursion_depth <= 0) {
@@ -162,8 +166,8 @@ class ArrayLoader {
     return Status::OK();
   }
 
-  Status GetBuffer(int buffer_index, std::shared_ptr<Buffer>* out) {
-    return context_->source->GetBuffer(buffer_index, out);
+  Status GetBuffer(int buffer_index, std::shared_ptr<Buffer>* out, int64_t offset, int64_t length) {
+    return context_->source->GetBuffer(buffer_index, out, offset, length);
   }
 
   Status LoadCommon() {
@@ -176,7 +180,29 @@ class ArrayLoader {
     if (out_->null_count == 0) {
       out_->buffers[0] = nullptr;
     } else {
-      RETURN_NOT_OK(GetBuffer(context_->buffer_index, &out_->buffers[0]));
+      int64_t null_offset = _offset / 8;
+      int64_t null_length = _length == std::numeric_limits<int64_t>::max() ? _length : (_length + 7)/8;
+      if (_offset % 8 != 0) {
+          null_length += 1;
+      }
+      RETURN_NOT_OK(GetBuffer(context_->buffer_index, &out_->buffers[0], null_offset, null_length));
+      if (out_->buffers[0] && _offset % 8 != 0) {
+          std::shared_ptr<Buffer> null_buffer;
+          RETURN_NOT_OK(out_->buffers[0]->Copy(0, out_->buffers[0]->size(), &null_buffer));
+          arrow::internal::CopyBitmap(out_->buffers[0]->data(), _offset % 8, out_->buffers[0]->size() * 8 - _offset % 8, null_buffer->mutable_data(), 0);
+          out_->buffers[0] = null_buffer;
+      }
+    }
+    if (_offset != 0 || _length != std::numeric_limits<int64_t>::max()) {
+        if (_length != std::numeric_limits<int64_t>::max()) {
+            out_->length = std::min(_length, out_->length - _offset);
+            if (out_->null_count != 0) {
+                out_->null_count = kUnknownNullCount;
+            }
+        }
+        else {
+            out_->length -= _offset;
+        }
     }
     context_->buffer_index++;
     return Status::OK();
@@ -188,7 +214,26 @@ class ArrayLoader {
 
     RETURN_NOT_OK(LoadCommon());
     if (out_->length > 0) {
-      RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[1]));
+      TYPE t;
+      if (t.bit_width() == 1) {
+        int64_t null_offset = _offset / 8;
+        int64_t null_length = _length == std::numeric_limits<int64_t>::max() ? _length : (_length + 7)/8;
+        if (_offset % 8 != 0) {
+            null_length += 1;
+        }
+        RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[1], null_offset, null_length));
+        auto buffer = out_->buffers[1];
+        if (buffer && _offset % 8 != 0) {
+            std::shared_ptr<Buffer> null_buffer;
+            RETURN_NOT_OK(buffer->Copy(0, buffer->size(), &null_buffer));
+            arrow::internal::CopyBitmap(buffer->data(), _offset % 8, buffer->size() * 8 - _offset % 8, null_buffer->mutable_data(), 0);
+            out_->buffers[1] = null_buffer;
+          }
+        }
+      else {
+         auto offset = get_offset(t.bit_width());
+         RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[1], offset.first, offset.second));
+      }
     } else {
       context_->buffer_index++;
       out_->buffers[1].reset(new Buffer(nullptr, 0));
@@ -201,8 +246,34 @@ class ArrayLoader {
     out_->buffers.resize(3);
 
     RETURN_NOT_OK(LoadCommon());
-    RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[1]));
-    return GetBuffer(context_->buffer_index++, &out_->buffers[2]);
+    auto length = _length;
+    if (length != std::numeric_limits<int64_t>::max()) {
+        length += 1;
+        length *= sizeof(int32_t);
+    }
+
+    RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[1], _offset * sizeof(int32_t), length));
+    int64_t start_offset = 0, data_length = std::numeric_limits<int64_t>::max();
+    if (_offset != 0) {
+        auto offsets_buffer = out_->buffers[1];
+        if (not offsets_buffer->is_mutable()) {
+            RETURN_NOT_OK(offsets_buffer->Copy(0, offsets_buffer->size(), &offsets_buffer));
+        }
+        auto offsets = reinterpret_cast<int32_t*>(offsets_buffer->mutable_data());
+        start_offset = *offsets;
+        if (offsets_buffer->size() == length) {
+            data_length = offsets[offsets_buffer->size() / sizeof(int32_t) - 1] - start_offset;
+        }
+        std::transform(offsets, offsets + offsets_buffer->size() / sizeof(int32_t), offsets, [start_offset](int32_t o) { return o - start_offset; });
+        out_->buffers[1] = offsets_buffer;
+    }
+    else if (_length != std::numeric_limits<int64_t>::max()) {
+        if (out_->buffers[1]->size() == length) {
+            auto offsets = reinterpret_cast<const int32_t *>(out_->buffers[1]->data());
+            data_length = offsets[out_->buffers[1]->size() / sizeof(int32_t) - 1];
+        }
+    }
+    return GetBuffer(context_->buffer_index++, &out_->buffers[2], start_offset, data_length);
   }
 
   Status LoadChild(const Field& field, ArrayData* out) {
@@ -214,6 +285,7 @@ class ArrayLoader {
   }
 
   Status LoadChildren(std::vector<std::shared_ptr<Field>> child_fields) {
+    // TODO only load the children you need if _offset or _length are set.
     out_->child_data.reserve(static_cast<int>(child_fields.size()));
 
     for (const auto& child_field : child_fields) {
@@ -227,7 +299,8 @@ class ArrayLoader {
   Status Visit(const NullType& type) {
     out_->buffers.resize(1);
     RETURN_NOT_OK(LoadCommon());
-    RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[0]));
+    auto offset = get_offset(1);
+    RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[0], offset.first, offset.second));
     return Status::OK();
   }
 
@@ -249,14 +322,21 @@ class ArrayLoader {
   Status Visit(const FixedSizeBinaryType& type) {
     out_->buffers.resize(2);
     RETURN_NOT_OK(LoadCommon());
-    return GetBuffer(context_->buffer_index++, &out_->buffers[1]);
+    auto t = reinterpret_cast<FixedSizeBinaryType*>(type_.get());
+    auto offset = get_offset(t->bit_width());
+
+    return GetBuffer(context_->buffer_index++, &out_->buffers[1], offset.first, offset.second);
   }
 
   Status Visit(const ListType& type) {
     out_->buffers.resize(2);
 
     RETURN_NOT_OK(LoadCommon());
-    RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[1]));
+    auto offset = get_offset(sizeof(int32_t)*8);
+    if (offset.second != std::numeric_limits<int64_t>::max()) {
+        offset.second += sizeof(int32_t);
+    }
+    RETURN_NOT_OK(GetBuffer(context_->buffer_index++, &out_->buffers[1], offset.first, offset.second));
 
     const int num_children = type.num_children();
     if (num_children != 1) {
@@ -277,9 +357,11 @@ class ArrayLoader {
 
     RETURN_NOT_OK(LoadCommon());
     if (out_->length > 0) {
-      RETURN_NOT_OK(GetBuffer(context_->buffer_index, &out_->buffers[1]));
+      auto offset = get_offset(sizeof(uint8_t)*8);
+      RETURN_NOT_OK(GetBuffer(context_->buffer_index, &out_->buffers[1], offset.first, offset.second));
       if (type.mode() == UnionMode::DENSE) {
-        RETURN_NOT_OK(GetBuffer(context_->buffer_index + 1, &out_->buffers[2]));
+        offset = get_offset(sizeof(int32_t)*8);
+        RETURN_NOT_OK(GetBuffer(context_->buffer_index + 1, &out_->buffers[2], offset.first, offset.second));
       }
     }
     context_->buffer_index += type.mode() == UnionMode::DENSE ? 2 : 1;
@@ -287,34 +369,49 @@ class ArrayLoader {
   }
 
   Status Visit(const DictionaryType& type) {
-    RETURN_NOT_OK(LoadArray(type.index_type(), context_, out_));
+    RETURN_NOT_OK(LoadArray(type.index_type(), context_, out_, _offset, _length));
     out_->type = type_;
     return Status::OK();
   }
 
   Status Visit(const ExtensionType& type) {
-    RETURN_NOT_OK(LoadArray(type.storage_type(), context_, out_));
+      if (_offset != 0 || _length != std::numeric_limits<int64_t>::max()) {
+          return arrow::Status::Invalid("Can't load ExtensionType data with offset or length");
+      }
+    RETURN_NOT_OK(LoadArray(type.storage_type(), context_, out_, 0, std::numeric_limits<int64_t>::max()));
     out_->type = type_;
     return Status::OK();
   }
 
  private:
+  std::pair<int64_t, int64_t> get_offset(int32_t bit_size) const {
+      int64_t l;
+      if (_length == std::numeric_limits<int64_t>::max()) {
+          l = _length;
+      }
+      else {
+          l = (_length * bit_size+7)/8;
+      }
+      return std::make_pair(_offset * bit_size / 8, l);
+  }
   const std::shared_ptr<DataType> type_;
   ArrayLoaderContext* context_;
 
   // Used in visitor pattern
   ArrayData* out_;
+  int64_t _offset;
+  int64_t _length;
 };
 
 static Status LoadArray(const std::shared_ptr<DataType>& type,
-                        ArrayLoaderContext* context, ArrayData* out) {
-  ArrayLoader loader(type, out, context);
+                        ArrayLoaderContext* context, ArrayData* out, int64_t offset, int64_t length) {
+  ArrayLoader loader(type, out, context, offset, length);
   return loader.Load();
 }
 
 Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
-                       io::RandomAccessFile* file, std::shared_ptr<RecordBatch>* out) {
-  return ReadRecordBatch(metadata, schema, kMaxNestingDepth, file, out);
+                       io::RandomAccessFile* file, std::shared_ptr<RecordBatch>* out, int64_t offset, int64_t length) {
+  return ReadRecordBatch(metadata, schema, kMaxNestingDepth, file, out, offset, length);
 }
 
 Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& schema,
@@ -331,7 +428,8 @@ Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& sc
 static Status LoadRecordBatchFromSource(const std::shared_ptr<Schema>& schema,
                                         int64_t num_rows, int max_recursion_depth,
                                         IpcComponentSource* source,
-                                        std::shared_ptr<RecordBatch>* out) {
+                                        std::shared_ptr<RecordBatch>* out,
+                                        int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max()) {
   ArrayLoaderContext context;
   context.source = source;
   context.field_index = 0;
@@ -339,29 +437,36 @@ static Status LoadRecordBatchFromSource(const std::shared_ptr<Schema>& schema,
   context.max_recursion_depth = max_recursion_depth;
 
   std::vector<std::shared_ptr<ArrayData>> arrays(schema->num_fields());
+  auto expected_num_rows = std::min(num_rows, length);
+  if (offset != 0) {
+      expected_num_rows = std::min(expected_num_rows, num_rows - offset);
+  }
+
   for (int i = 0; i < schema->num_fields(); ++i) {
     auto arr = std::make_shared<ArrayData>();
-    RETURN_NOT_OK(LoadArray(schema->field(i)->type(), &context, arr.get()));
-    DCHECK_EQ(num_rows, arr->length) << "Array length did not match record batch length";
+    RETURN_NOT_OK(LoadArray(schema->field(i)->type(), &context, arr.get(), offset, length));
+    DCHECK_EQ(expected_num_rows, arr->length) << "Array length did not match record batch length";
     arrays[i] = std::move(arr);
   }
 
-  *out = RecordBatch::Make(schema, num_rows, std::move(arrays));
+  *out = RecordBatch::Make(schema, std::min(num_rows, length), std::move(arrays));
   return Status::OK();
 }
 
 static inline Status ReadRecordBatch(const flatbuf::RecordBatch* metadata,
                                      const std::shared_ptr<Schema>& schema,
                                      int max_recursion_depth, io::RandomAccessFile* file,
-                                     std::shared_ptr<RecordBatch>* out) {
+                                     std::shared_ptr<RecordBatch>* out,
+                                     int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max()) {
   IpcComponentSource source(metadata, file);
   return LoadRecordBatchFromSource(schema, metadata->length(), max_recursion_depth,
-                                   &source, out);
+                                   &source, out, offset, length);
 }
 
 Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
                        int max_recursion_depth, io::RandomAccessFile* file,
-                       std::shared_ptr<RecordBatch>* out) {
+                       std::shared_ptr<RecordBatch>* out,
+                       int64_t offset, int64_t length) {
   auto message = flatbuf::GetMessage(metadata.data());
   if (message->header_type() != flatbuf::MessageHeader_RecordBatch) {
     DCHECK_EQ(message->header_type(), flatbuf::MessageHeader_RecordBatch);
@@ -370,7 +475,7 @@ Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& sc
     return Status::IOError("Header-pointer of flatbuffer-encoded Message is null.");
   }
   auto batch = reinterpret_cast<const flatbuf::RecordBatch*>(message->header());
-  return ReadRecordBatch(batch, schema, max_recursion_depth, file, out);
+  return ReadRecordBatch(batch, schema, max_recursion_depth, file, out, offset, length);
 }
 
 Status ReadDictionary(const Buffer& metadata, const DictionaryTypeMap& dictionary_types,
@@ -556,34 +661,6 @@ Status RecordBatchStreamReader::ReadNext(std::shared_ptr<RecordBatch>* batch) {
 // ----------------------------------------------------------------------
 // Reader implementation
 
-class RecordSubBatchReader : public IRecordBatchFileReader {
-public:
-    RecordSubBatchReader(std::shared_ptr<arrow::RecordBatch> batch, int32_t max_batch_size) : _batch(std::move(batch)), _max_batch_size(max_batch_size) {
-    }
-
-    int num_record_batches() const override {
-        return (_batch->num_rows() + _max_batch_size - 1) / _max_batch_size;
-    }
-
-    std::shared_ptr<Schema> schema() const {
-        return _batch->schema();
-    }
-
-    Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) final {
-        *batch = _batch->Slice(i * _max_batch_size, _max_batch_size);
-        return arrow::Status::OK();
-    }
-
-    Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size) final {
-        std::shared_ptr<arrow::RecordBatch> batch;
-        ARROW_RETURN_NOT_OK(ReadRecordBatch(i, &batch));
-        *reader = std::make_shared<RecordSubBatchReader>(batch, max_batch_size);
-        return arrow::Status::OK();
-    }
-private:
-    std::shared_ptr<arrow::RecordBatch> _batch;
-    int32_t _max_batch_size;
-};
 class RecordBatchFileReader::RecordBatchFileReaderImpl {
  public:
   RecordBatchFileReaderImpl() : file_(NULLPTR), footer_offset_(0), footer_(NULLPTR) {
@@ -630,6 +707,38 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
 
   int num_record_batches() const { return footer_->recordBatches()->size(); }
 
+  arrow::Status record_batch_num_rows(int64_t batch_index, int64_t* ret) {
+      DCHECK_GE(batch_index, 0);
+      DCHECK_LT(batch_index, num_record_batches());
+      FileBlock block = record_batch(batch_index);
+
+      DCHECK(BitUtil::IsMultipleOf8(block.offset));
+      DCHECK(BitUtil::IsMultipleOf8(block.metadata_length));
+      DCHECK(BitUtil::IsMultipleOf8(block.body_length));
+
+      std::unique_ptr<Message> message;
+      RETURN_NOT_OK(ReadMessage(block.offset, block.metadata_length, file_, &message));
+
+      // TODO(wesm): this breaks integration tests, see ARROW-3256
+      // DCHECK_EQ(message->body_length(), block.body_length);
+
+        // io::BufferReader reader(message->body());
+      auto& metadata = *message->metadata();
+      //::arrow::ipc::ReadRecordBatch(, schema_, &reader, batch, offset, length);
+      //ReadRecordBatch(metadata, schema, kMaxNestingDepth, file, out, offset, length);
+      auto metadata_message = flatbuf::GetMessage(metadata.data());
+      if (metadata_message->header_type() != flatbuf::MessageHeader_RecordBatch) {
+          DCHECK_EQ(metadata_message->header_type(), flatbuf::MessageHeader_RecordBatch);
+      }
+      if (metadata_message->header() == nullptr) {
+          return Status::IOError("Header-pointer of flatbuffer-encoded Message is null.");
+      }
+      auto batch = reinterpret_cast<const flatbuf::RecordBatch*>(metadata_message->header());
+      *ret = batch->length();
+      return arrow::Status::OK();
+
+  }
+
   MetadataVersion version() const {
     return internal::GetMetadataVersion(footer_->version());
   }
@@ -642,7 +751,7 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     return FileBlockFromFlatbuffer(footer_->dictionaries()->Get(i));
   }
 
-  Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) {
+  Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max()) {
     DCHECK_GE(i, 0);
     DCHECK_LT(i, num_record_batches());
     FileBlock block = record_batch(i);
@@ -657,18 +766,14 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     // TODO(wesm): this breaks integration tests, see ARROW-3256
     // DCHECK_EQ(message->body_length(), block.body_length);
 
+    // TODO adorr - create a lazy reader.
     io::BufferReader reader(message->body());
-    return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, &reader, batch);
+    return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, &reader, batch, offset, length);
   }
 
   Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
-                                                       int32_t max_batch_size) {
-      std::shared_ptr<arrow::RecordBatch> batch;
-      ARROW_RETURN_NOT_OK(ReadRecordBatch(i, &batch));
-      *reader = std::make_shared<RecordSubBatchReader>(batch, max_batch_size);
-      return arrow::Status::OK();
-  }
-
+                                                       int32_t max_batch_size,
+                                                       std::shared_ptr<RecordBatchFileReaderImpl> impl);
 
         Status ReadSchema() {
     RETURN_NOT_OK(internal::GetDictionaryTypes(footer_->schema(), &dictionary_fields_));
@@ -732,7 +837,48 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
 
   // Reconstructed schema, including any read dictionaries
   std::shared_ptr<Schema> schema_;
+private:
+    class RecordSubBatchReader : public IRecordBatchFileReader {
+    public:
+        friend class RecordBatchFileReader;
+        RecordSubBatchReader(std::shared_ptr<RecordBatchFileReader::RecordBatchFileReaderImpl> impl, int64_t batch_index, int64_t max_sub_batch_size, int64_t batch_length) :
+            impl_(std::move(impl)), _max_batch_size(max_sub_batch_size), _batch_index(batch_index), _batch_length(batch_length) {
+        }
+
+        int num_record_batches() const override {
+            return (_batch_length + _max_batch_size - 1)/_max_batch_size;
+        }
+
+        std::shared_ptr<Schema> schema() const override {
+            return impl_->schema();
+        }
+
+        Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) final {
+            auto batch_size = _max_batch_size;
+            if ((i + 1) * _max_batch_size > _batch_length) {
+                batch_size = _batch_length % _max_batch_size;
+            }
+            return impl_->ReadRecordBatch(_batch_index, batch, i * _max_batch_size, batch_size);
+        }
+
+    private:
+        std::shared_ptr<RecordBatchFileReader::RecordBatchFileReaderImpl> impl_;
+        int64_t _max_batch_size;
+        int64_t _batch_index;
+        int64_t _batch_length;
+    };
+
 };
+
+Status RecordBatchFileReader::RecordBatchFileReaderImpl::ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
+                                int32_t max_batch_size, std::shared_ptr<RecordBatchFileReaderImpl> impl) {
+    std::shared_ptr<arrow::RecordBatch> batch;
+    int64_t len;
+    ARROW_RETURN_NOT_OK(record_batch_num_rows(i, &len));
+    *reader = std::make_shared<RecordSubBatchReader>(impl, i, max_batch_size, len);
+    return arrow::Status::OK();
+}
+
 
 RecordBatchFileReader::RecordBatchFileReader() {
   impl_.reset(new RecordBatchFileReaderImpl());
@@ -782,7 +928,7 @@ Status RecordBatchFileReader::ReadRecordBatch(int i,
 
 Status RecordBatchFileReader::ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
                                                        int32_t max_batch_size) {
-    return impl_->ReadRecordBatchAsBatches(i, reader, max_batch_size);
+    return impl_->ReadRecordBatchAsBatches(i, reader, max_batch_size, impl_);
 }
 
 
