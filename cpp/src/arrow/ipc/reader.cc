@@ -802,8 +802,8 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     RETURN_NOT_OK(ReadMessageFromBlock(GetRecordBatchBlock(i), &message));
 
     auto reader(message->body());
-    if (length == std::numeric_limits<int64_t>::max() && !reader->supports_zero_copy()) {
-      //As we need all the data, it will be faster to read it all at once.
+    if ((offset != 0 || length == std::numeric_limits<int64_t>::max()) && !reader->supports_zero_copy()) {
+      //If we need all the data and the reader doesnt support zero copy, it will be faster to read it all at once.
       std::shared_ptr<Buffer> body_buffer;
       RETURN_NOT_OK(reader->Read(message->body_length(), &body_buffer));
       reader = std::make_shared<io::BufferReader>(body_buffer);
