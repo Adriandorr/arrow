@@ -760,7 +760,7 @@ TEST_F(RecursionLimits, ReadLimit) {
   DictionaryMemo empty_memo;
   std::shared_ptr<RecordBatch> result;
   ASSERT_RAISES(Invalid, ReadRecordBatch(*message->metadata(), schema, &empty_memo,
-                                         &reader, &result));
+                                         reader.get(), &result));
 }
 
 // Test fails with a structured exception on Windows + Debug
@@ -782,7 +782,7 @@ TEST_F(RecursionLimits, StressLimit) {
 
     std::shared_ptr<RecordBatch> result;
     ASSERT_OK(ReadRecordBatch(*message->metadata(), schema, &empty_memo,
-                              recursion_depth + 1, &reader, &result));
+                              recursion_depth + 1, reader.get(), &result));
     *it_works = result->Equals(*batch);
   };
 

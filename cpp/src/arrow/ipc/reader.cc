@@ -152,7 +152,6 @@ class ArrayLoader {
  public:
   ArrayLoader(const Field& field, ArrayData* out, ArrayLoaderContext* context, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max())
       : field_(field), context_(context), out_(out), _offset(offset), _length(length) {}
-  }
 
   Status Load() {
     if (context_->max_recursion_depth <= 0) {
@@ -320,8 +319,7 @@ class ArrayLoader {
   Status Visit(const FixedSizeBinaryType& type) {
     out_->buffers.resize(2);
     RETURN_NOT_OK(LoadCommon());
-    auto t = reinterpret_cast<FixedSizeBinaryType*>(type_.get());
-    auto offset = get_offset(t->bit_width());
+    auto offset = get_offset(type.bit_width());
 
     return GetBuffer(context_->buffer_index++, &out_->buffers[1], offset.first, offset.second);
   }
@@ -437,12 +435,12 @@ Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& sc
 
 Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& schema,
                        const DictionaryMemo* dictionary_memo,
-                       std::shared_ptr<RecordBatch>* out) {
+                       std::shared_ptr<RecordBatch>* out, int64_t offset, int64_t length) {
   CHECK_MESSAGE_TYPE(message.type(), Message::RECORD_BATCH);
   CHECK_HAS_BODY(message);
   auto reader(message.body());
   return ReadRecordBatch(*message.metadata(), schema, dictionary_memo, kMaxNestingDepth,
-                         &reader, out, offset, length);
+                         reader.get(), out, offset, length);
 }
 
 // ----------------------------------------------------------------------
@@ -576,8 +574,8 @@ class RecordBatchStreamReader::RecordBatchStreamReaderImpl {
     // Only invoke this method if we already know we have a dictionary message
     DCHECK_EQ(message.type(), Message::DICTIONARY_BATCH);
     CHECK_HAS_BODY(message);
-    io::BufferReader reader(message.body());
-    return ReadDictionary(*message.metadata(), &dictionary_memo_, &reader);
+    auto reader(message.body());
+    return ReadDictionary(*message.metadata(), &dictionary_memo_, reader.get());
   }
 
   Status ReadInitialDictionaries() {
@@ -730,14 +728,10 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
   arrow::Status record_batch_num_rows(int64_t batch_index, int64_t* ret) {
       DCHECK_GE(batch_index, 0);
       DCHECK_LT(batch_index, num_record_batches());
-      FileBlock block = record_batch(batch_index);
-
-      DCHECK(BitUtil::IsMultipleOf8(block.offset));
-      DCHECK(BitUtil::IsMultipleOf8(block.metadata_length));
-      DCHECK(BitUtil::IsMultipleOf8(block.body_length));
+      FileBlock block = GetRecordBatchBlock(batch_index);
 
       std::unique_ptr<Message> message;
-      RETURN_NOT_OK(ReadMessage(block.offset, block.metadata_length, file_, &message));
+      RETURN_NOT_OK(ReadMessageFromBlock(block, &message));
 
       // TODO(wesm): this breaks integration tests, see ARROW-3256
       // DCHECK_EQ(message->body_length(), block.body_length);
@@ -771,41 +765,31 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     return FileBlockFromFlatbuffer(footer_->dictionaries()->Get(i));
   }
 
-  Status ReadMessageFromBlock(const FileBlock& block, std::unique_ptr<Message>* out, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max()) {
-    DCHECK(BitUtil::IsMultipleOf8(block.offset));
-    DCHECK(BitUtil::IsMultipleOf8(block.metadata_length));
-    DCHECK(BitUtil::IsMultipleOf8(block.body_length));
+  Status ReadMessageFromBlock(const FileBlock& block, std::unique_ptr<Message>* out) {
+     DCHECK(BitUtil::IsMultipleOf8(block.offset));
+     DCHECK(BitUtil::IsMultipleOf8(block.metadata_length));
+     DCHECK(BitUtil::IsMultipleOf8(block.body_length));
 
-    RETURN_NOT_OK(ReadMessage(block.offset, block.metadata_length, file_, out));
+     RETURN_NOT_OK(ReadMessage(block.offset, block.metadata_length, file_, out));
 
-    // TODO(wesm): this breaks integration tests, see ARROW-3256
-    // DCHECK_EQ((*out)->body_length(), block.body_length);
-    return Status::OK();
-        //As we need all the data, it will be faster to read it all at once.
-        std::shared_ptr<Buffer> body_buffer;
-        RETURN_NOT_OK(reader->Read(message->body_length(), &body_buffer));
-        reader = std::make_shared<io::BufferReader>(body_buffer);
-    }
-    return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, reader.get(), batch, offset, length);
+     // TODO(wesm): this breaks integration tests, see ARROW-3256
+     // DCHECK_EQ((*out)->body_length(), block.body_length);
+     return Status::OK();
   }
-
-  Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
-                                                       int32_t max_batch_size,
-                                                       std::shared_ptr<RecordBatchFileReaderImpl> impl);
 
   Status ReadDictionaries() {
     // Read all the dictionaries
     for (int i = 0; i < num_dictionaries(); ++i) {
-      std::unique_ptr<Message> message;
-      RETURN_NOT_OK(ReadMessageFromBlock(GetDictionaryBlock(i), &message));
+       std::unique_ptr<Message> message;
+       RETURN_NOT_OK(ReadMessageFromBlock(GetDictionaryBlock(i), &message));
 
-      io::BufferReader reader(message->body());
-      RETURN_NOT_OK(ReadDictionary(*message->metadata(), &dictionary_memo_, &reader));
+       auto reader(message->body());
+       RETURN_NOT_OK(ReadDictionary(*message->metadata(), &dictionary_memo_, reader.get()));
     }
     return Status::OK();
   }
 
-  Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch) {
+  Status ReadRecordBatch(int i, std::shared_ptr<RecordBatch>* batch, int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max()) {
     DCHECK_GE(i, 0);
     DCHECK_LT(i, num_record_batches());
 
@@ -817,10 +801,20 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     std::unique_ptr<Message> message;
     RETURN_NOT_OK(ReadMessageFromBlock(GetRecordBatchBlock(i), &message));
 
-    io::BufferReader reader(message->body());
+    auto reader(message->body());
+    if (length == std::numeric_limits<int64_t>::max() && !reader->supports_zero_copy()) {
+      //As we need all the data, it will be faster to read it all at once.
+      std::shared_ptr<Buffer> body_buffer;
+      RETURN_NOT_OK(reader->Read(message->body_length(), &body_buffer));
+      reader = std::make_shared<io::BufferReader>(body_buffer);
+    }
     return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, &dictionary_memo_,
-                                         &reader, batch);
+                                         reader.get(), batch, offset, length);
   }
+
+  Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
+                                                       int32_t max_batch_size,
+                                                       std::shared_ptr<RecordBatchFileReaderImpl> impl);
 
   Status ReadSchema() {
     // Get the schema and record any observed dictionaries
@@ -861,6 +855,8 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
             case Type::MAP:
             case Type::EXTENSION:
             case Type::NA:
+            case Type::FIXED_SIZE_LIST: //TODO - can we support this
+            case Type::DURATION: //TODO - can we support this
                 if (message) {
                     *message = "Cannot rerad slice for field " + s->field(i)->ToString();
                 }
