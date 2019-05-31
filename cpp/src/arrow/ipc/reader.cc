@@ -848,15 +848,15 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
             case Type::INTERVAL:
             case Type::DECIMAL:
             case Type::DICTIONARY:
+            case Type::DURATION:
                 break;
             case Type::LIST:
             case Type::STRUCT:
             case Type::UNION:
             case Type::MAP:
             case Type::EXTENSION:
+            case Type::FIXED_SIZE_LIST:
             case Type::NA:
-            case Type::FIXED_SIZE_LIST: //TODO - can we support this
-            case Type::DURATION: //TODO - can we support this
                 if (message) {
                     *message = "Cannot rerad slice for field " + s->field(i)->ToString();
                 }

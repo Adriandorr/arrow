@@ -251,6 +251,12 @@ Status MakePrimitiveRecordBatch<Time64Builder>(std::shared_ptr<RecordBatch>* out
     return MakePrimitiveRecordBatchImpl(builder, out);
 }
 
+template<>
+Status MakePrimitiveRecordBatch<DurationBuilder>(std::shared_ptr<RecordBatch>* out) {
+    DurationBuilder builder(duration(TimeUnit::MICRO), default_memory_pool());
+    return MakePrimitiveRecordBatchImpl(builder, out);
+}
+
 template<typename T>
 Status MakeStringRecordBatch(std::shared_ptr<RecordBatch>* out) {
     T builder(default_memory_pool());
@@ -311,12 +317,13 @@ Status MakePrimitiveRecordBatch<Decimal128Builder>(std::shared_ptr<RecordBatch>*
                     &MakePrimitiveRecordBatch<FloatBuilder>,                            \
                     &MakePrimitiveRecordBatch<DoubleBuilder>,                           \
                     &MakePrimitiveRecordBatch<BooleanBuilder>,                          \
-                    &MakePrimitiveRecordBatch<Date32Builder>,                          \
-                    &MakePrimitiveRecordBatch<Date64Builder>,                          \
-                    &MakePrimitiveRecordBatch<TimestampBuilder>,                          \
-                    &MakePrimitiveRecordBatch<Time32Builder>,                          \
-                    &MakePrimitiveRecordBatch<Time64Builder>,                          \
+                    &MakePrimitiveRecordBatch<Date32Builder>,                           \
+                    &MakePrimitiveRecordBatch<Date64Builder>,                           \
+                    &MakePrimitiveRecordBatch<TimestampBuilder>,                        \
+                    &MakePrimitiveRecordBatch<Time32Builder>,                           \
+                    &MakePrimitiveRecordBatch<Time64Builder>,                           \
                     &MakePrimitiveRecordBatch<DecimalBuilder>,                          \
+                    &MakePrimitiveRecordBatch<DurationBuilder>,                         \
                     &MakeStringRecordBatch<StringBuilder>,                              \
                     &MakeStringRecordBatch<BinaryBuilder>,                              \
                     &MakeFixedSizeBinaryRecordBatch,                                    \
