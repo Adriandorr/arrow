@@ -770,6 +770,12 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     // DCHECK_EQ(message->body_length(), block.body_length);
 
     auto reader(message->body());
+    if (length == std::numeric_limits<int64_t>::max() && !reader->supports_zero_copy()) {
+        //As we need all the data, it will be faster to read it all at once.
+        std::shared_ptr<Buffer> body_buffer;
+        RETURN_NOT_OK(reader->Read(message->body_length(), &body_buffer));
+        reader = std::make_shared<io::BufferReader>(body_buffer);
+    }
     return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, reader.get(), batch, offset, length);
   }
 
@@ -984,7 +990,7 @@ bool RecordBatchFileReader::CanReadRecordBatchAsBatches() const {
     return impl_->CanReadRecordBatchAsBatches();
 }
 
-        static Status ReadContiguousPayload(io::InputStream* file,
+static Status ReadContiguousPayload(io::InputStream* file,
                             std::unique_ptr<Message>* message) {
   RETURN_NOT_OK(ReadMessage(file, message));
   if (*message == nullptr) {
