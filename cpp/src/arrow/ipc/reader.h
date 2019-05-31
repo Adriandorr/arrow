@@ -171,6 +171,8 @@ class ARROW_EXPORT RecordBatchFileReader : public IRecordBatchFileReader {
 
   Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader>* reader, int32_t max_batch_size);
 
+  bool CanReadRecordBatchAsBatches() const;
+
 private:
   RecordBatchFileReader();
 

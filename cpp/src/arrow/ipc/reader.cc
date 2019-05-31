@@ -347,6 +347,9 @@ class ArrayLoader {
   }
 
   Status Visit(const StructType& type) {
+    if (_offset != 0 || _length != std::numeric_limits<int64_t>::max()) {
+      return Status::NotImplemented("Can't read slices for Struct type arrays");
+    }
     out_->buffers.resize(1);
     RETURN_NOT_OK(LoadCommon());
     return LoadChildren(type.children());
@@ -775,7 +778,7 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
                                                        int32_t max_batch_size,
                                                        std::shared_ptr<RecordBatchFileReaderImpl> impl);
 
-        Status ReadSchema() {
+  Status ReadSchema() {
     RETURN_NOT_OK(internal::GetDictionaryTypes(footer_->schema(), &dictionary_fields_));
 
     // Read all the dictionaries
@@ -803,6 +806,49 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
 
     // Get the schema
     return internal::GetSchema(footer_->schema(), *dictionary_memo_, &schema_);
+  }
+
+  bool CanReadRecordBatchAsBatches(std::string* message = nullptr) const {
+    auto s = schema();
+    for (int32_t i = 0; i < s->num_fields(); i++) {
+        switch (s->field(i)->type()->id()) {
+            case Type::BOOL:
+            case Type::UINT8:
+            case Type::INT8:
+            case Type::UINT16:
+            case Type::INT16:
+            case Type::UINT32:
+            case Type::INT32:
+            case Type::UINT64:
+            case Type::INT64:
+            case Type::HALF_FLOAT:
+            case Type::FLOAT:
+            case Type::DOUBLE:
+            case Type::STRING:
+            case Type::BINARY:
+            case Type::FIXED_SIZE_BINARY:
+            case Type::DATE32:
+            case Type::DATE64:
+            case Type::TIMESTAMP:
+            case Type::TIME32:
+            case Type::TIME64:
+            case Type::INTERVAL:
+            case Type::DECIMAL:
+            case Type::DICTIONARY:
+                break;
+            case Type::LIST:
+            case Type::STRUCT:
+            case Type::UNION:
+            case Type::MAP:
+            case Type::EXTENSION:
+            case Type::NA:
+                if (message) {
+                    *message = "Cannot rerad slice for field " + s->field(i)->ToString();
+                }
+                return false;
+        }
+    }
+    return true;
   }
 
   Status Open(const std::shared_ptr<io::RandomAccessFile>& file, int64_t footer_offset) {
@@ -872,6 +918,10 @@ private:
 
 Status RecordBatchFileReader::RecordBatchFileReaderImpl::ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
                                 int32_t max_batch_size, std::shared_ptr<RecordBatchFileReaderImpl> impl) {
+    std::string message;
+    if (not CanReadRecordBatchAsBatches(&message)) {
+        return arrow::Status::Invalid(message);
+    }
     std::shared_ptr<arrow::RecordBatch> batch;
     int64_t len;
     ARROW_RETURN_NOT_OK(record_batch_num_rows(i, &len));
@@ -931,6 +981,9 @@ Status RecordBatchFileReader::ReadRecordBatchAsBatches(int i, std::shared_ptr<IR
     return impl_->ReadRecordBatchAsBatches(i, reader, max_batch_size, impl_);
 }
 
+bool RecordBatchFileReader::CanReadRecordBatchAsBatches() const {
+    return impl_->CanReadRecordBatchAsBatches();
+}
 
         static Status ReadContiguousPayload(io::InputStream* file,
                             std::unique_ptr<Message>* message) {
