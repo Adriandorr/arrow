@@ -427,22 +427,6 @@ static Status LoadArray(const Field& field, ArrayLoaderContext* context, ArrayDa
   return loader.Load();
 }
 
-Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
-                       const DictionaryMemo* dictionary_memo, io::RandomAccessFile* file,
-                       std::shared_ptr<RecordBatch>* out, int64_t offset, int64_t length) {
-  return ReadRecordBatch(metadata, schema, dictionary_memo, kMaxNestingDepth, file, out, offset, length);
-}
-
-Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& schema,
-                       const DictionaryMemo* dictionary_memo,
-                       std::shared_ptr<RecordBatch>* out, int64_t offset, int64_t length) {
-  CHECK_MESSAGE_TYPE(message.type(), Message::RECORD_BATCH);
-  CHECK_HAS_BODY(message);
-  auto reader(message.body());
-  return ReadRecordBatch(*message.metadata(), schema, dictionary_memo, kMaxNestingDepth,
-                         reader.get(), out, offset, length);
-}
-
 // ----------------------------------------------------------------------
 // Array loading
 
@@ -496,6 +480,42 @@ Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& sc
   }
   auto batch = reinterpret_cast<const flatbuf::RecordBatch*>(message->header());
   return ReadRecordBatch(batch, schema, dictionary_memo, max_recursion_depth, file, out, offset, length);
+}
+
+Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
+                       const DictionaryMemo* dictionary_memo, int max_recursion_depth,
+                       io::RandomAccessFile* file, std::shared_ptr<RecordBatch>* out) {
+    return ReadRecordBatch(metadata, schema, dictionary_memo, max_recursion_depth,
+                           file, out, 0, std::numeric_limits<int64_t>::max());
+}
+
+Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
+                       const DictionaryMemo* dictionary_memo, io::RandomAccessFile* file,
+                       std::shared_ptr<RecordBatch>* out, int64_t offset, int64_t length) {
+    return ReadRecordBatch(metadata, schema, dictionary_memo, kMaxNestingDepth, file, out, offset, length);
+}
+
+Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
+                       const DictionaryMemo* dictionary_memo, io::RandomAccessFile* file,
+                       std::shared_ptr<RecordBatch>* out) {
+    return ReadRecordBatch(metadata, schema, dictionary_memo, kMaxNestingDepth, file, out, 0, std::numeric_limits<int64_t>::max());
+}
+
+Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& schema,
+                       const DictionaryMemo* dictionary_memo,
+                       std::shared_ptr<RecordBatch>* out, int64_t offset, int64_t length) {
+    CHECK_MESSAGE_TYPE(message.type(), Message::RECORD_BATCH);
+    CHECK_HAS_BODY(message);
+    auto reader(message.body());
+    return ReadRecordBatch(*message.metadata(), schema, dictionary_memo, kMaxNestingDepth,
+                           reader.get(), out, offset, length);
+}
+
+Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& schema,
+                       const DictionaryMemo* dictionary_memo,
+                       std::shared_ptr<RecordBatch>* out) {
+
+    return ReadRecordBatch(message, schema, dictionary_memo, out, 0, std::numeric_limits<int64_t>::max());
 }
 
 Status ReadDictionary(const Buffer& metadata, DictionaryMemo* dictionary_memo,

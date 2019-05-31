@@ -237,8 +237,7 @@ Status ReadRecordBatch(const std::shared_ptr<Schema>& schema,
 ARROW_EXPORT
 Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
                        const DictionaryMemo* dictionary_memo, io::RandomAccessFile* file,
-                       std::shared_ptr<RecordBatch>* out,
-                       int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max());
+                       std::shared_ptr<RecordBatch>* out);
 
 /// \brief Read record batch from encapsulated Message
 ///
@@ -268,8 +267,7 @@ Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& sc
 ARROW_EXPORT
 Status ReadRecordBatch(const Buffer& metadata, const std::shared_ptr<Schema>& schema,
                        const DictionaryMemo* dictionary_memo, int max_recursion_depth,
-                       io::RandomAccessFile* file, std::shared_ptr<RecordBatch>* out,
-                       int64_t offset = 0, int64_t length = std::numeric_limits<int64_t>::max());
+                       io::RandomAccessFile* file, std::shared_ptr<RecordBatch>* out);
 
 /// \brief Read arrow::Tensor as encapsulated IPC message in file
 ///
