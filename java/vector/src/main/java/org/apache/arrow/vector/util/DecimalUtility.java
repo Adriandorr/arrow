@@ -23,7 +23,11 @@ import java.nio.ByteBuffer;
 
 import io.netty.buffer.ArrowBuf;
 
+/**
+ * Utility methods for configurable precision Decimal values (e.g. {@link BigDecimal}).
+ */
 public class DecimalUtility {
+  private DecimalUtility() {}
 
   public static final int DECIMAL_BYTE_LENGTH = 16;
 

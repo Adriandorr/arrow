@@ -116,6 +116,7 @@ class LevelBuilder {
                                   " not supported yet");                   \
   }
 
+  NOT_IMPLEMENTED_VISIT(FixedSizeList)
   NOT_IMPLEMENTED_VISIT(Struct)
   NOT_IMPLEMENTED_VISIT(Union)
   NOT_IMPLEMENTED_VISIT(Dictionary)
@@ -1022,7 +1023,7 @@ class FileWriter::Impl {
 
       // TODO(ARROW-1648): Remove this special handling once we require an Arrow
       // version that has this fixed.
-      if (dict_type.dictionary()->type()->id() == ::arrow::Type::NA) {
+      if (dict_type.value_type()->id() == ::arrow::Type::NA) {
         auto null_array = std::make_shared<::arrow::NullArray>(data->length());
         return WriteColumnChunk(*null_array);
       }
@@ -1030,8 +1031,8 @@ class FileWriter::Impl {
       FunctionContext ctx(this->memory_pool());
       ::arrow::compute::Datum cast_input(data);
       ::arrow::compute::Datum cast_output;
-      RETURN_NOT_OK(Cast(&ctx, cast_input, dict_type.dictionary()->type(), CastOptions(),
-                         &cast_output));
+      RETURN_NOT_OK(
+          Cast(&ctx, cast_input, dict_type.value_type(), CastOptions(), &cast_output));
       return WriteColumnChunk(cast_output.chunked_array(), offset, size);
     }
 

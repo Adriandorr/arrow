@@ -42,6 +42,13 @@ public class NettyArrowBuf extends AbstractByteBuf implements AutoCloseable  {
   private int length;
   private final long address;
 
+  /**
+   * Constructs a new instance.
+   *
+   * @param arrowBuf The buffer to wrap.
+   * @param arrowByteBufAllocator The allocator for the buffer (assumed to be {@link ArrowByteBufAllocator}).
+   * @param length The length of this buffer.
+   */
   public NettyArrowBuf(
       final ArrowBuf arrowBuf,
       final ByteBufAllocator arrowByteBufAllocator,
@@ -67,6 +74,10 @@ public class NettyArrowBuf extends AbstractByteBuf implements AutoCloseable  {
   public ByteBuf retain() {
     arrowBuf.getReferenceManager().retain();
     return this;
+  }
+
+  public ArrowBuf arrowBuf() {
+    return arrowBuf;
   }
 
   @Override
@@ -344,12 +355,12 @@ public class NettyArrowBuf extends AbstractByteBuf implements AutoCloseable  {
 
   @Override
   public int setBytes(int index, ScatteringByteChannel in, int length) throws IOException {
-    throw new UnsupportedOperationException("Operation not supported");
+    return (int) in.read(nioBuffers(index, length));
   }
 
   @Override
   public int setBytes(int index, FileChannel in, long position, int length) throws IOException {
-    throw new UnsupportedOperationException("Operation not supported");
+    return (int) in.read(nioBuffers(index, length));
   }
 
   @Override

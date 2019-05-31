@@ -51,7 +51,7 @@ set_source_files_properties(File_generated.h PROPERTIES GENERATED TRUE)
 
 set(OUTPUT_DIR ${ARROW_BINARY_DIR}/src/arrow/ipc)
 set(FBS_OUTPUT_FILES "${OUTPUT_DIR}/File_generated.h" "${OUTPUT_DIR}/Message_generated.h"
-    "${OUTPUT_DIR}/feather_generated.h")
+                     "${OUTPUT_DIR}/feather_generated.h")
 
 set(FBS_SRC
     ${ARROW_SOURCE_DIR}/../format/Message.fbs
@@ -72,7 +72,11 @@ if(NOT FLATC_EXECUTABLE)
 endif()
 message(STATUS "flatc: ${FLATC_EXECUTABLE}")
 add_custom_command(OUTPUT ${FBS_OUTPUT_FILES}
-                   COMMAND ${FLATC_EXECUTABLE} -c -o ${OUTPUT_DIR} ${ABS_FBS_SRC}
+                   COMMAND ${FLATC_EXECUTABLE}
+                           -c
+                           -o
+                           ${OUTPUT_DIR}
+                           ${ABS_FBS_SRC}
                    DEPENDS flatbuffers::flatc
                    COMMENT "Running flatc compiler on ${ABS_FBS_SRC}"
                    VERBATIM)

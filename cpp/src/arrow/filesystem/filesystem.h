@@ -27,6 +27,17 @@
 #include "arrow/util/compression.h"
 #include "arrow/util/visibility.h"
 
+// The Windows API defines macros from *File resolving to either
+// *FileA or *FileW.  Need to undo them.
+#ifdef _WIN32
+#ifdef DeleteFile
+#undef DeleteFile
+#endif
+#ifdef CopyFile
+#undef CopyFile
+#endif
+#endif
+
 namespace arrow {
 
 namespace io {
@@ -78,7 +89,7 @@ struct ARROW_EXPORT FileStats {
   std::string path() const { return path_; }
   void set_path(const std::string& path) { path_ = path; }
 
-  // The file base name (component after the last directory separator or '/').
+  // The file base name (component after the last directory separator).
   std::string base_name() const;
 
   // The size in bytes, if available.  Only regular files are guaranteed
@@ -134,9 +145,11 @@ class ARROW_EXPORT FileSystem {
   virtual Status GetTargetStats(const Selector& select, std::vector<FileStats>* out) = 0;
 
   /// Create a directory and subdirectories.
+  ///
+  /// This function succeeds if the directory already exists.
   virtual Status CreateDir(const std::string& path, bool recursive = true) = 0;
 
-  /// Delete a directory and contents.
+  /// Delete a directory and its contents, recursively.
   virtual Status DeleteDir(const std::string& path) = 0;
 
   /// Delete a file.
@@ -148,13 +161,17 @@ class ARROW_EXPORT FileSystem {
 
   /// Move / rename a file or directory.
   ///
-  /// The destination will be replaced if it exists.
+  /// If the destination exists:
+  /// - if it is a non-empty directory, an error is returned
+  /// - otherwise, if it has the same type as the source, it is replaced
+  /// - otherwise, behavior is unspecified (implementation-dependent).
   virtual Status Move(const std::string& src, const std::string& dest) = 0;
 
   /// Copy a file.
   ///
-  /// The destination will be replaced if it exists.
-  virtual Status Copy(const std::string& src, const std::string& dest) = 0;
+  /// If the destination exists and is a directory, an error is returned.
+  /// Otherwise, it is replaced.
+  virtual Status CopyFile(const std::string& src, const std::string& dest) = 0;
 
   /// Open an input stream for sequential reading.
   virtual Status OpenInputStream(const std::string& path,
@@ -175,6 +192,55 @@ class ARROW_EXPORT FileSystem {
   /// If the target doesn't exist, a new empty file is created.
   virtual Status OpenAppendStream(const std::string& path,
                                   std::shared_ptr<io::OutputStream>* out) = 0;
+};
+
+/// \brief EXPERIMENTAL: a FileSystem implementation that delegates to another
+/// implementation after prepending a fixed base path.
+///
+/// This is useful to expose a logical view of a subtree of a filesystem,
+/// for example a directory in a LocalFileSystem.
+/// This makes no security guarantee.  For example, symlinks may allow to
+/// "escape" the subtree and access other parts of the underlying filesystem.
+class ARROW_EXPORT SubTreeFileSystem : public FileSystem {
+ public:
+  explicit SubTreeFileSystem(const std::string& base_path,
+                             std::shared_ptr<FileSystem> base_fs);
+  ~SubTreeFileSystem() override;
+
+  using FileSystem::GetTargetStats;
+  Status GetTargetStats(const std::string& path, FileStats* out) override;
+  Status GetTargetStats(const Selector& select, std::vector<FileStats>* out) override;
+
+  Status CreateDir(const std::string& path, bool recursive = true) override;
+
+  Status DeleteDir(const std::string& path) override;
+
+  Status DeleteFile(const std::string& path) override;
+
+  Status Move(const std::string& src, const std::string& dest) override;
+
+  Status CopyFile(const std::string& src, const std::string& dest) override;
+
+  Status OpenInputStream(const std::string& path,
+                         std::shared_ptr<io::InputStream>* out) override;
+
+  Status OpenInputFile(const std::string& path,
+                       std::shared_ptr<io::RandomAccessFile>* out) override;
+
+  Status OpenOutputStream(const std::string& path,
+                          std::shared_ptr<io::OutputStream>* out) override;
+
+  Status OpenAppendStream(const std::string& path,
+                          std::shared_ptr<io::OutputStream>* out) override;
+
+ protected:
+  const std::string base_path_;
+  std::shared_ptr<FileSystem> base_fs_;
+
+  std::string PrependBase(const std::string& s) const;
+  Status PrependBaseNonEmpty(std::string* s) const;
+  Status StripBase(const std::string& s, std::string* out) const;
+  Status FixStats(FileStats* st) const;
 };
 
 }  // namespace fs

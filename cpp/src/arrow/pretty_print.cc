@@ -158,9 +158,9 @@ class ArrayPrinter : public PrettyPrinter {
   template <typename T>
   enable_if_date<typename T::TypeClass, Status> WriteDataValues(const T& array) {
     const auto data = array.raw_values();
-    using unit =
-        typename std::conditional<std::is_same<T, Date32Array>::value, util::date::days,
-                                  std::chrono::milliseconds>::type;
+    using unit = typename std::conditional<std::is_same<T, Date32Array>::value,
+                                           arrow_vendored::date::days,
+                                           std::chrono::milliseconds>::type;
     WriteValues(array, [&](int64_t i) { FormatDateTime<unit>("%F", data[i], true); });
     return Status::OK();
   }
@@ -179,6 +179,17 @@ class ArrayPrinter : public PrettyPrinter {
     const auto type = static_cast<const TimeType*>(array.type().get());
     WriteValues(array,
                 [&](int64_t i) { FormatDateTime(type->unit(), "%T", data[i], false); });
+    return Status::OK();
+  }
+
+  template <typename T>
+  inline
+      typename std::enable_if<std::is_same<DayTimeIntervalArray, T>::value, Status>::type
+      WriteDataValues(const T& array) {
+    WriteValues(array, [&](int64_t i) {
+      auto day_millis = array.GetValue(i);
+      (*sink_) << day_millis.days << "d" << day_millis.milliseconds << "ms";
+    });
     return Status::OK();
   }
 
@@ -229,7 +240,9 @@ class ArrayPrinter : public PrettyPrinter {
   }
 
   template <typename T>
-  inline typename std::enable_if<std::is_base_of<ListArray, T>::value, Status>::type
+  inline typename std::enable_if<std::is_base_of<ListArray, T>::value ||
+                                     std::is_base_of<FixedSizeListArray, T>::value,
+                                 Status>::type
   WriteDataValues(const T& array) {
     bool skip_comma = true;
     for (int64_t i = 0; i < array.length(); ++i) {
@@ -265,7 +278,8 @@ class ArrayPrinter : public PrettyPrinter {
   typename std::enable_if<std::is_base_of<PrimitiveArray, T>::value ||
                               std::is_base_of<FixedSizeBinaryArray, T>::value ||
                               std::is_base_of<BinaryArray, T>::value ||
-                              std::is_base_of<ListArray, T>::value,
+                              std::is_base_of<ListArray, T>::value ||
+                              std::is_base_of<FixedSizeListArray, T>::value,
                           Status>::type
   Visit(const T& array) {
     OpenArray(array);
@@ -275,8 +289,6 @@ class ArrayPrinter : public PrettyPrinter {
     CloseArray(array);
     return Status::OK();
   }
-
-  Status Visit(const IntervalArray&) { return Status::NotImplemented("interval"); }
 
   Status Visit(const ExtensionArray& array) { return Print(*array.storage()); }
 
@@ -355,9 +367,9 @@ class ArrayPrinter : public PrettyPrinter {
   template <typename Unit>
   void FormatDateTime(const char* fmt, int64_t value, bool add_epoch) {
     if (add_epoch) {
-      (*sink_) << util::date::format(fmt, epoch_ + Unit{value});
+      (*sink_) << arrow_vendored::date::format(fmt, epoch_ + Unit{value});
     } else {
-      (*sink_) << util::date::format(fmt, Unit{value});
+      (*sink_) << arrow_vendored::date::format(fmt, Unit{value});
     }
   }
 
@@ -379,12 +391,12 @@ class ArrayPrinter : public PrettyPrinter {
     }
   }
 
-  static util::date::sys_days epoch_;
+  static arrow_vendored::date::sys_days epoch_;
   std::string null_rep_;
 };
 
-util::date::sys_days ArrayPrinter::epoch_ =
-    util::date::sys_days{util::date::jan / 1 / 1970};
+arrow_vendored::date::sys_days ArrayPrinter::epoch_ =
+    arrow_vendored::date::sys_days{arrow_vendored::date::jan / 1 / 1970};
 
 Status ArrayPrinter::WriteValidityBitmap(const Array& array) {
   Indent();
@@ -541,25 +553,16 @@ class SchemaPrinter : public PrettyPrinter {
 
 Status SchemaPrinter::PrintType(const DataType& type) {
   Write(type.ToString());
-  if (type.id() == Type::DICTIONARY) {
-    indent_ += indent_size_;
+  for (int i = 0; i < type.num_children(); ++i) {
     Newline();
-    Write("dictionary:\n");
-    const auto& dict_type = checked_cast<const DictionaryType&>(type);
-    RETURN_NOT_OK(PrettyPrint(*dict_type.dictionary(), indent_ + indent_size_, sink_));
+
+    std::stringstream ss;
+    ss << "child " << i << ", ";
+
+    indent_ += indent_size_;
+    WriteIndented(ss.str());
+    RETURN_NOT_OK(PrintField(*type.child(i)));
     indent_ -= indent_size_;
-  } else {
-    for (int i = 0; i < type.num_children(); ++i) {
-      Newline();
-
-      std::stringstream ss;
-      ss << "child " << i << ", ";
-
-      indent_ += indent_size_;
-      WriteIndented(ss.str());
-      RETURN_NOT_OK(PrintField(*type.child(i)));
-      indent_ -= indent_size_;
-    }
   }
   return Status::OK();
 }

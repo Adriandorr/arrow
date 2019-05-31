@@ -77,7 +77,7 @@ public final class ArrowBuf implements AutoCloseable {
   private int readerIndex;
   private int writerIndex;
   private final HistoricalLog historicalLog = BaseAllocator.DEBUG ?
-      new HistoricalLog(BaseAllocator.DEBUG_LOG_LENGTH, "ArrowBuf[%d]", id) : null;
+          new HistoricalLog(BaseAllocator.DEBUG_LOG_LENGTH, "ArrowBuf[%d]", id) : null;
   private volatile int length;
 
   /**
@@ -165,6 +165,11 @@ public final class ArrowBuf implements AutoCloseable {
     return length;
   }
 
+  /**
+   * Adjusts the capacity of this buffer.  Size increases are NOT supported.
+   *
+   * @param newCapacity Must be in in the range [0, length).
+   */
   public synchronized ArrowBuf capacity(int newCapacity) {
 
     if (newCapacity == length) {
@@ -181,24 +186,39 @@ public final class ArrowBuf implements AutoCloseable {
     throw new UnsupportedOperationException("Buffers don't support resizing that increases the size.");
   }
 
+  /**
+   * Returns the byte order of elements in this buffer.
+   */
   public ByteOrder order() {
     return ByteOrder.LITTLE_ENDIAN;
   }
 
+  /**
+   * Returns the number of bytes still available to read in this buffer.
+   */
   public int readableBytes() {
     Preconditions.checkState(writerIndex >= readerIndex,
             "Writer index cannot be less than reader index");
     return writerIndex - readerIndex;
   }
 
+  /**
+   * Returns the number of bytes still available to write into this buffer before capacity is reached.
+   */
   public int writableBytes() {
     return capacity() - writerIndex;
   }
 
+  /**
+   * Returns a slice of only the readable bytes in the buffer.
+   */
   public ArrowBuf slice() {
     return slice(readerIndex, readableBytes());
   }
 
+  /**
+   *  Returns a slice (view) starting at <code>index</code> with the given <code>length</code>.
+   */
   public ArrowBuf slice(int index, int length) {
     if (isEmpty) {
       return this;
@@ -1182,6 +1202,53 @@ public final class ArrowBuf implements AutoCloseable {
     } else {
       throw new UnsupportedOperationException(
               "Realloc is only available in the context of operator's UDFs");
+    }
+  }
+
+  /**
+   * Following are wrapper methods to keep this backward compatible.
+   */
+  @Deprecated
+  public void release() {
+    referenceManager.release();
+  }
+
+  @Deprecated
+  public void release(int decrement) {
+    referenceManager.release(decrement);
+  }
+
+  @Deprecated
+  public void retain() {
+    referenceManager.retain();
+  }
+
+  @Deprecated
+  public void retain(int increment) {
+    referenceManager.retain(increment);
+  }
+
+  @Deprecated
+  public ArrowBuf clear() {
+    this.readerIndex = this.writerIndex = 0;
+    return this;
+  }
+
+  /**
+   * Initialize the reader and writer index.
+   * @param readerIndex index to read from
+   * @param writerIndex index to write to
+   * @return this
+   */
+  @Deprecated
+  public ArrowBuf setIndex(int readerIndex, int writerIndex) {
+    if (readerIndex >= 0 && readerIndex <= writerIndex && writerIndex <= this.capacity()) {
+      this.readerIndex = readerIndex;
+      this.writerIndex = writerIndex;
+      return this;
+    } else {
+      throw new IndexOutOfBoundsException(String.format("readerIndex: %d, writerIndex: %d " +
+       "(expected:0 <= readerIndex <= writerIndex <= capacity(%d))", readerIndex, writerIndex, this.capacity()));
     }
   }
 }

@@ -38,10 +38,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # shared libraries
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# if no build build type is specified, default to debug builds
-if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Release)
-endif(NOT CMAKE_BUILD_TYPE)
 string(TOUPPER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE)
 
 # compiler flags that are common across debug/release builds
@@ -228,6 +224,11 @@ if("${COMPILER_FAMILY}" STREQUAL "gcc")
   if("${COMPILER_VERSION}" VERSION_GREATER "4.9")
     # Add colors when paired with ninja
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdiagnostics-color=always")
+  endif()
+
+  if("${COMPILER_VERSION}" VERSION_LESS "6.0")
+    # Work around https://gcc.gnu.org/bugzilla/show_bug.cgi?id=43407
+    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-attributes")
   endif()
 endif()
 

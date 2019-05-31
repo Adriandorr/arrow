@@ -39,7 +39,7 @@ import io.netty.buffer.ArrowBuf;
  * vector are null.
  */
 public class IntervalDayVector extends BaseFixedWidthVector {
-  private static final byte TYPE_WIDTH = 8;
+  public static final byte TYPE_WIDTH = 8;
   private static final byte MILLISECOND_OFFSET = 4;
   private final FieldReader reader;
 
@@ -95,6 +95,33 @@ public class IntervalDayVector extends BaseFixedWidthVector {
    |                                                                |
    *----------------------------------------------------------------*/
 
+  /**
+   * Given a data buffer, get the number of days stored at a particular position
+   * in the vector.
+   *
+   * <p>This method should not be used externally.
+   *
+   * @param buffer data buffer
+   * @param index  position of the element.
+   * @return day value stored at the index.
+   */
+  public static int getDays(final ArrowBuf buffer, final int index) {
+    return buffer.getInt(index * TYPE_WIDTH);
+  }
+
+  /**
+   * Given a data buffer, get the get the number of milliseconds stored at a particular position
+   * in the vector.
+   *
+   * <p>This method should not be used externally.
+   *
+   * @param buffer data buffer
+   * @param index  position of the element.
+   * @return milliseconds value stored at the index.
+   */
+  public static int getMilliseconds(final ArrowBuf buffer, final int index) {
+    return buffer.getInt((index * TYPE_WIDTH) + MILLISECOND_OFFSET);
+  }
 
   /**
    * Get the element at the given index from the vector.

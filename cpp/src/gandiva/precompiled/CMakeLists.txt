@@ -41,7 +41,7 @@ if(MSVC)
     set(FMS_COMPATIBILITY 19)
   endif()
   set(PLATFORM_CLANG_OPTIONS -std=c++14 -fms-compatibility
-      -fms-compatibility-version=${FMS_COMPATIBILITY})
+                             -fms-compatibility-version=${FMS_COMPATIBILITY})
 else()
   set(PLATFORM_CLANG_OPTIONS -std=c++11)
 endif()

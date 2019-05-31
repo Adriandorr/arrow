@@ -2593,6 +2593,7 @@ def test_write_nested_zero_length_array_chunk_failure():
     _check_roundtrip(tbl)
 
 
+@pytest.mark.pandas
 def test_partitioned_dataset(tempdir):
     # ARROW-3208: Segmentation fault when reading a Parquet partitioned dataset
     # to a Parquet file
@@ -2622,6 +2623,7 @@ def test_read_column_invalid_index():
             f.reader.read_column(index)
 
 
+@pytest.mark.pandas
 def test_dataset_metadata(tempdir):
     path = tempdir / "ARROW-1983-dataset"
 
@@ -2630,7 +2632,7 @@ def test_dataset_metadata(tempdir):
         'one': [1, 2, 3],
         'two': [-1, -2, -3],
         'three': [[1, 2], [2, 3], [3, 4]],
-        })
+    })
     table = pa.Table.from_pandas(df)
 
     metadata_list = []
@@ -2651,3 +2653,18 @@ def test_dataset_metadata(tempdir):
         assert d.pop('serialized_size') == 0
         assert d2.pop('serialized_size') > 0
         assert d == d2
+
+
+def test_parquet_file_too_small(tempdir):
+    path = str(tempdir / "test.parquet")
+    with pytest.raises(pa.ArrowIOError,
+                       match='size is 0 bytes'):
+        with open(path, 'wb') as f:
+            pass
+        pq.read_table(path)
+
+    with pytest.raises(pa.ArrowIOError,
+                       match='size is 4 bytes'):
+        with open(path, 'wb') as f:
+            f.write(b'ffff')
+        pq.read_table(path)

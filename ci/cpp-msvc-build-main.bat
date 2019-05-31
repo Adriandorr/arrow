@@ -22,12 +22,10 @@ set ARROW_HOME=%CONDA_PREFIX%\Library
 set CMAKE_ARGS=-DARROW_VERBOSE_THIRDPARTY_BUILD=OFF
 
 if "%JOB%" == "Toolchain" (
-  @rem Toolchain gtest does not currently work with Visual Studio 2015
   set CMAKE_ARGS=^
       %CMAKE_ARGS% ^
       -DARROW_WITH_BZ2=ON ^
-      -DARROW_DEPENDENCY_SOURCE=CONDA ^
-      -DGTest_SOURCE=BUNDLED
+      -DARROW_DEPENDENCY_SOURCE=CONDA
 ) else (
   @rem We're in a conda enviroment but don't want to use it for the dependencies
   set CMAKE_ARGS=%CMAKE_ARGS% -DARROW_DEPENDENCY_SOURCE=AUTO
@@ -59,7 +57,6 @@ cmake -G "%GENERATOR%" %CMAKE_ARGS% ^
       -DCMAKE_BUILD_TYPE=%CONFIGURATION% ^
       -DARROW_BUILD_STATIC=OFF ^
       -DARROW_BUILD_TESTS=ON ^
-      -DARROW_BUILD_EXAMPLES=ON ^
       -DARROW_BUILD_EXAMPLES=ON ^
       -DARROW_VERBOSE_THIRDPARTY_BUILD=ON ^
       -DARROW_CXXFLAGS="%ARROW_CXXFLAGS%" ^
@@ -100,17 +97,17 @@ set PYARROW_PARALLEL=2
 @rem ARROW-3075; pkgconfig is broken for Parquet for now
 set PARQUET_HOME=%CONDA_PREFIX%\Library
 
-python setup.py build_ext ^
-    install -q --single-version-externally-managed --record=record.text ^
-    bdist_wheel -q || exit /B
+python setup.py develop -q || exit /B
+
+py.test -r sxX --durations=15 --pyargs pyarrow.tests || exit /B
+
+@rem
+@rem Build wheel
+@rem
+
+python setup.py bdist_wheel -q || exit /B
 
 for /F %%i in ('dir /B /S dist\*.whl') do set WHEEL_PATH=%%i
-
-@rem Test directly from installed location
-@rem (needed for test_cython)
-
-set PYARROW_PATH=%CONDA_PREFIX%\Lib\site-packages\pyarrow
-py.test -r sxX --durations=15 %PYARROW_PATH% || exit /B
 
 popd
 
