@@ -24,9 +24,11 @@
 #include <string>
 
 #include <flatbuffers/flatbuffers.h>
+#include <arrow/io/api.h>
 
 #include "arrow/buffer.h"
 #include "arrow/io/interfaces.h"
+#include "arrow/io/offset_reader.h"
 #include "arrow/ipc/Message_generated.h"
 #include "arrow/ipc/metadata-internal.h"
 #include "arrow/ipc/util.h"
@@ -40,6 +42,14 @@ class Message::MessageImpl {
  public:
   explicit MessageImpl(const std::shared_ptr<Buffer>& metadata,
                        const std::shared_ptr<Buffer>& body)
+      : metadata_(metadata), message_(nullptr) {
+      if (body) {
+          body_ = std::make_shared<io::BufferReader>(body);
+      }
+  }
+
+  explicit MessageImpl(const std::shared_ptr<Buffer>& metadata,
+                       const std::shared_ptr<io::RandomAccessFile>& body)
       : metadata_(metadata), message_(nullptr), body_(body) {}
 
   Status Open() {
@@ -76,9 +86,22 @@ class Message::MessageImpl {
 
   const void* header() const { return message_->header(); }
 
-  int64_t body_length() const { return message_->bodyLength(); }
+  int64_t body_length() const {
+      if (message_) {
+          return message_->bodyLength();
+      }
+      if (body_) {
+          int64_t ret;
+          auto status = body_->GetSize(&ret);
+          if (not status.ok()) {
+              throw std::runtime_error(status.ToString());
+          }
+          return ret;
+      }
+      return 0;
+  }
 
-  std::shared_ptr<Buffer> body() const { return body_; }
+  std::shared_ptr<io::RandomAccessFile> body() const { return body_; }
 
   std::shared_ptr<Buffer> metadata() const { return metadata_; }
 
@@ -88,12 +111,17 @@ class Message::MessageImpl {
   const flatbuf::Message* message_;
 
   // The message body, if any
-  std::shared_ptr<Buffer> body_;
+  std::shared_ptr<io::RandomAccessFile> body_;
 };
 
 Message::Message(const std::shared_ptr<Buffer>& metadata,
                  const std::shared_ptr<Buffer>& body) {
   impl_.reset(new MessageImpl(metadata, body));
+}
+
+Message::Message(const std::shared_ptr<Buffer>& metadata,
+                 const std::shared_ptr<io::RandomAccessFile>& body) {
+ impl_.reset(new MessageImpl(metadata, body));
 }
 
 Status Message::Open(const std::shared_ptr<Buffer>& metadata,
@@ -102,9 +130,14 @@ Status Message::Open(const std::shared_ptr<Buffer>& metadata,
   return (*out)->impl_->Open();
 }
 
+Status Message::Open(const std::shared_ptr<Buffer>& metadata,
+                   const std::shared_ptr<io::RandomAccessFile>& body, std::unique_ptr<Message>* out) {
+    out->reset(new Message(metadata, body));
+    return (*out)->impl_->Open();
+}
 Message::~Message() {}
 
-std::shared_ptr<Buffer> Message::body() const { return impl_->body(); }
+std::shared_ptr<io::RandomAccessFile> Message::body() const { return impl_->body(); }
 
 int64_t Message::body_length() const { return impl_->body_length(); }
 
@@ -127,11 +160,22 @@ bool Message::Equals(const Message& other) const {
   auto this_body = body();
   auto other_body = other.body();
 
-  const bool this_has_body = (this_body != nullptr) && (this_body->size() > 0);
-  const bool other_has_body = (other_body != nullptr) && (other_body->size() > 0);
+  auto this_size = body_length();
+  auto other_size = other.body_length();
+  const bool this_has_body = (this_body != nullptr) && (this_size > 0);
+  const bool other_has_body = (other_body != nullptr) && (other_size > 0);
 
   if (this_has_body && other_has_body) {
-    return this_body->Equals(*other_body);
+      if (this_size == other_size) {
+          std::shared_ptr<arrow::Buffer> this_buffer, other_buffer;
+          auto this_status = this_body->ReadAt(0, this_size, &this_buffer);
+          auto other_status = other_body->ReadAt(0, other_size, &other_buffer);
+          if (this_status.ok() && other_status.ok()) {
+              return this_buffer->Equals(*other_buffer);
+          }
+          return false;
+      }
+      return false;
   } else if (this_has_body ^ other_has_body) {
     // One has a body but not the other
     return false;
@@ -168,13 +212,7 @@ Status Message::ReadFrom(const int64_t offset, const std::shared_ptr<Buffer>& me
 
   int64_t body_length = fb_message->bodyLength();
 
-  std::shared_ptr<Buffer> body;
-  RETURN_NOT_OK(file->ReadAt(offset, body_length, &body));
-  if (body->size() < body_length) {
-    return Status::IOError("Expected to be able to read ", body_length,
-                           " bytes for message body, got ", body->size());
-  }
-
+  auto body = std::make_shared<io::OffsetRandomAccessFile>(file, offset, body_length);
   return Message::Open(metadata, body, out);
 }
 
@@ -194,16 +232,20 @@ Status Message::SerializeTo(io::OutputStream* stream, int32_t alignment,
 
   *output_length = metadata_length;
 
-  auto body_buffer = body();
-  if (body_buffer) {
-    RETURN_NOT_OK(stream->Write(body_buffer->data(), body_buffer->size()));
-    *output_length += body_buffer->size();
+  auto body_reader = body();
+  if (body_reader) {
+      std::shared_ptr<arrow::Buffer> body_buffer;
+      RETURN_NOT_OK(body_reader->ReadAt(0, std::numeric_limits<int64_t>::max(), &body_buffer));
+      if (body_buffer) {
+          RETURN_NOT_OK(stream->Write(body_buffer->data(), body_buffer->size()));
+          *output_length += body_buffer->size();
 
-    DCHECK_GE(this->body_length(), body_buffer->size());
+          DCHECK_GE(this->body_length(), body_buffer->size());
 
-    int64_t remainder = this->body_length() - body_buffer->size();
-    RETURN_NOT_OK(WritePadding(stream, remainder));
-    *output_length += remainder;
+          int64_t remainder = this->body_length() - body_buffer->size();
+          RETURN_NOT_OK(WritePadding(stream, remainder));
+          *output_length += remainder;
+      }
   }
   return Status::OK();
 }

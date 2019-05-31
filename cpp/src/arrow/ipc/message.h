@@ -72,10 +72,16 @@ class ARROW_EXPORT Message {
  public:
   enum Type { NONE, SCHEMA, DICTIONARY_BATCH, RECORD_BATCH, TENSOR, SPARSE_TENSOR };
 
+
   /// \brief Construct message, but do not validate
   ///
   /// Use at your own risk; Message::Open has more metadata validation
-  Message(const std::shared_ptr<Buffer>& metadata, const std::shared_ptr<Buffer>& body);
+  explicit Message(const std::shared_ptr<Buffer>& metadata, const std::shared_ptr<Buffer>& body);
+
+  /// \brief Construct message, but do not validate
+  ///
+  /// Use at your own risk; Message::Open has more metadata validation
+  Message(const std::shared_ptr<Buffer>& metadata, const std::shared_ptr<io::RandomAccessFile>& body);
 
   ~Message();
 
@@ -88,7 +94,17 @@ class ARROW_EXPORT Message {
   static Status Open(const std::shared_ptr<Buffer>& metadata,
                      const std::shared_ptr<Buffer>& body, std::unique_ptr<Message>* out);
 
-  /// \brief Read message body and create Message given Flatbuffer metadata
+  /// \brief Create and validate a Message instance from a buffer and a reader for the body
+  ///
+  /// \param[in] metadata a buffer containing the Flatbuffer metadata
+  /// \param[in] body a randon access reader for the message body, which may be null
+  /// \param[out] out the created message
+  /// \return Status
+  static Status Open(const std::shared_ptr<Buffer>& metadata,
+                       const std::shared_ptr<io::RandomAccessFile>& body, std::unique_ptr<Message>* out);
+
+
+    /// \brief Read message body and create Message given Flatbuffer metadata
   /// \param[in] metadata containing a serialized Message flatbuffer
   /// \param[in] stream an InputStream
   /// \param[out] out the created Message
@@ -124,7 +140,7 @@ class ARROW_EXPORT Message {
   /// \brief the Message body, if any
   ///
   /// \return buffer is null if no body
-  std::shared_ptr<Buffer> body() const;
+  std::shared_ptr<io::RandomAccessFile> body() const;
 
   /// \brief The expected body length according to the metadata, for
   /// verification purposes

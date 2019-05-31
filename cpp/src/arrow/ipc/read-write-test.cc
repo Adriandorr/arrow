@@ -64,11 +64,12 @@ TEST(TestMessage, Equals) {
   auto b2 = std::make_shared<Buffer>(metadata);
   auto b3 = std::make_shared<Buffer>(body);
   auto b4 = std::make_shared<Buffer>(body);
+  auto null_buffer = std::shared_ptr<Buffer>();
 
   Message msg1(b1, b3);
   Message msg2(b2, b4);
-  Message msg3(b1, nullptr);
-  Message msg4(b2, nullptr);
+  Message msg3(b1, null_buffer);
+  Message msg4(b2, null_buffer);
 
   ASSERT_TRUE(msg1.Equals(msg2));
   ASSERT_TRUE(msg3.Equals(msg4));
@@ -744,10 +745,10 @@ TEST_F(RecursionLimits, ReadLimit) {
   std::unique_ptr<Message> message;
   ASSERT_OK(ReadMessage(0, metadata_length, mmap_.get(), &message));
 
-  io::BufferReader reader(message->body());
+  auto reader(message->body());
 
   std::shared_ptr<RecordBatch> result;
-  ASSERT_RAISES(Invalid, ReadRecordBatch(*message->metadata(), schema, &reader, &result));
+  ASSERT_RAISES(Invalid, ReadRecordBatch(*message->metadata(), schema, reader.get(), &result));
 }
 
 // Test fails with a structured exception on Windows + Debug
@@ -764,9 +765,9 @@ TEST_F(RecursionLimits, StressLimit) {
     std::unique_ptr<Message> message;
     ASSERT_OK(ReadMessage(0, metadata_length, mmap_.get(), &message));
 
-    io::BufferReader reader(message->body());
+    auto reader(message->body());
     std::shared_ptr<RecordBatch> result;
-    ASSERT_OK(ReadRecordBatch(*message->metadata(), schema, recursion_depth + 1, &reader,
+    ASSERT_OK(ReadRecordBatch(*message->metadata(), schema, recursion_depth + 1, reader.get(),
                               &result));
     *it_works = result->Equals(*batch);
   };

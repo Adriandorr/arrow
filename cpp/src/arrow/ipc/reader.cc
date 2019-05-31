@@ -421,8 +421,8 @@ Status ReadRecordBatch(const Message& message, const std::shared_ptr<Schema>& sc
                        std::shared_ptr<RecordBatch>* out) {
   CHECK_MESSAGE_TYPE(message.type(), Message::RECORD_BATCH);
   CHECK_HAS_BODY(message);
-  io::BufferReader reader(message.body());
-  return ReadRecordBatch(*message.metadata(), schema, kMaxNestingDepth, &reader, out);
+  auto reader(message.body());
+  return ReadRecordBatch(*message.metadata(), schema, kMaxNestingDepth, reader.get(), out);
 }
 
 // ----------------------------------------------------------------------
@@ -559,11 +559,11 @@ class RecordBatchStreamReader::RecordBatchStreamReaderImpl {
     }
 
     CHECK_HAS_BODY(*message);
-    io::BufferReader reader(message->body());
+    auto reader(message->body());
 
     std::shared_ptr<Array> dictionary;
     int64_t id;
-    RETURN_NOT_OK(ReadDictionary(*message->metadata(), dictionary_types_, &reader, &id,
+    RETURN_NOT_OK(ReadDictionary(*message->metadata(), dictionary_types_, reader.get(), &id,
                                  &dictionary));
     return dictionary_memo_.AddDictionary(id, dictionary);
   }
@@ -604,8 +604,8 @@ class RecordBatchStreamReader::RecordBatchStreamReaderImpl {
     }
 
     CHECK_HAS_BODY(*message);
-    io::BufferReader reader(message->body());
-    return ReadRecordBatch(*message->metadata(), schema_, &reader, batch);
+    auto reader(message->body());
+    return ReadRecordBatch(*message->metadata(), schema_, reader.get(), batch);
   }
 
   std::shared_ptr<Schema> schema() const { return schema_; }
@@ -769,9 +769,8 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
     // TODO(wesm): this breaks integration tests, see ARROW-3256
     // DCHECK_EQ(message->body_length(), block.body_length);
 
-    // TODO adorr - create a lazy reader.
-    io::BufferReader reader(message->body());
-    return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, &reader, batch, offset, length);
+    auto reader(message->body());
+    return ::arrow::ipc::ReadRecordBatch(*message->metadata(), schema_, reader.get(), batch, offset, length);
   }
 
   Status ReadRecordBatchAsBatches(int i, std::shared_ptr<IRecordBatchFileReader> *reader,
@@ -795,11 +794,11 @@ class RecordBatchFileReader::RecordBatchFileReaderImpl {
       // TODO(wesm): this breaks integration tests, see ARROW-3256
       // DCHECK_EQ(message->body_length(), block.body_length);
 
-      io::BufferReader reader(message->body());
+      auto reader(message->body());
 
       std::shared_ptr<Array> dictionary;
       int64_t dictionary_id;
-      RETURN_NOT_OK(ReadDictionary(*message->metadata(), dictionary_fields_, &reader,
+      RETURN_NOT_OK(ReadDictionary(*message->metadata(), dictionary_fields_, reader.get(),
                                    &dictionary_id, &dictionary));
       RETURN_NOT_OK(dictionary_memo_->AddDictionary(dictionary_id, dictionary));
     }
@@ -1011,8 +1010,8 @@ Status ReadRecordBatch(const std::shared_ptr<Schema>& schema, io::InputStream* f
                        std::shared_ptr<RecordBatch>* out) {
   std::unique_ptr<Message> message;
   RETURN_NOT_OK(ReadContiguousPayload(file, &message));
-  io::BufferReader buffer_reader(message->body());
-  return ReadRecordBatch(*message->metadata(), schema, kMaxNestingDepth, &buffer_reader,
+  auto buffer_reader(message->body());
+  return ReadRecordBatch(*message->metadata(), schema, kMaxNestingDepth, buffer_reader.get(),
                          out);
 }
 
@@ -1029,7 +1028,9 @@ Status ReadTensor(const Message& message, std::shared_ptr<Tensor>* out) {
   std::vector<std::string> dim_names;
   RETURN_NOT_OK(internal::GetTensorMetadata(*message.metadata(), &type, &shape, &strides,
                                             &dim_names));
-  *out = std::make_shared<Tensor>(type, message.body(), shape, strides, dim_names);
+  std::shared_ptr<arrow::Buffer> body;
+  RETURN_NOT_OK(message.body()->ReadAt(0, message.body_length(), &body));
+  *out = std::make_shared<Tensor>(type, body, shape, strides, dim_names);
   return Status::OK();
 }
 
@@ -1139,8 +1140,8 @@ Status ReadSparseTensor(const Buffer& metadata, io::RandomAccessFile* file,
 }
 
 Status ReadSparseTensor(const Message& message, std::shared_ptr<SparseTensor>* out) {
-  io::BufferReader buffer_reader(message.body());
-  return ReadSparseTensor(*message.metadata(), &buffer_reader, out);
+  auto buffer_reader(message.body());
+  return ReadSparseTensor(*message.metadata(), buffer_reader.get(), out);
 }
 
 Status ReadSparseTensor(io::InputStream* file, std::shared_ptr<SparseTensor>* out) {
@@ -1148,8 +1149,8 @@ Status ReadSparseTensor(io::InputStream* file, std::shared_ptr<SparseTensor>* ou
   RETURN_NOT_OK(ReadContiguousPayload(file, &message));
   CHECK_MESSAGE_TYPE(message->type(), Message::SPARSE_TENSOR);
   CHECK_HAS_BODY(*message);
-  io::BufferReader buffer_reader(message->body());
-  return ReadSparseTensor(*message->metadata(), &buffer_reader, out);
+  auto buffer_reader(message->body());
+  return ReadSparseTensor(*message->metadata(), buffer_reader.get(), out);
 }
 
 }  // namespace ipc
